@@ -8,6 +8,7 @@ import {
   Dimensions,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { router } from 'expo-router';
 import { Colors } from '../constants/colors';
 import { mockFirebase } from '../services/mockFirebase';
 import { useAppStore } from '../store/appStore';
@@ -295,12 +296,12 @@ export default function DashboardScreen() {
           <Text style={styles.navLabel}>History</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.navItem}>
+        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/alerts')}>
           <Text style={styles.navIcon}>⚠</Text>
           <Text style={styles.navLabel}>Alerts</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.navItem}>
+        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/circuit-analyser')}>
           <Text style={styles.navIcon}>🎮</Text>
           <Text style={styles.navLabel}>Control</Text>
         </TouchableOpacity>
