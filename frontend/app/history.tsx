@@ -10,6 +10,7 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { Colors } from '../constants/colors';
 import { router } from 'expo-router';
+import NavigationMenu from '../components/NavigationMenu';
 
 const { width } = Dimensions.get('window');
 
@@ -17,6 +18,7 @@ const timeframes = ['1h', '6h', '1d', '1w', '7d', '30d'];
 
 export default function HistoryScreen() {
   const [selectedTimeframe, setSelectedTimeframe] = useState('1d');
+  const [showMenu, setShowMenu] = useState(false);
 
   const faultHistory = [
     { id: 1, circuit: 'Bedroom AC', type: 'OVERLOAD', date: '12/02', time: '21:17-21:22' },
@@ -30,9 +32,16 @@ export default function HistoryScreen() {
       style={styles.container}
     >
       <ScrollView showsVerticalScrollIndicator={false}>
+        {/* Navigation Menu */}
+        <NavigationMenu 
+          visible={showMenu}
+          onClose={() => setShowMenu(false)}
+          currentScreen="/history"
+        />
+
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()}>
+          <TouchableOpacity onPress={() => setShowMenu(true)}>
             <Text style={styles.backButton}>☰</Text>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Energy Insights</Text>

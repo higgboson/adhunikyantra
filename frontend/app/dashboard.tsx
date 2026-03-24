@@ -14,6 +14,7 @@ import { mockFirebase } from '../services/mockFirebase';
 import { useAppStore } from '../store/appStore';
 import { DEVICE_ID } from '../constants/circuit';
 import type { LiveData, CircuitData } from '../types/firebase';
+import NavigationMenu from '../components/NavigationMenu';
 
 const { width } = Dimensions.get('window');
 
@@ -96,85 +97,21 @@ export default function DashboardScreen() {
         <View style={styles.header}>
           <Text style={styles.headerTitle}>⚡ ADHUNIK YANTRA</Text>
           <View style={styles.headerIcons}>
-            <TouchableOpacity style={styles.iconButton} onPress={() => setShowMenu(!showMenu)}>
+            <TouchableOpacity style={styles.iconButton} onPress={() => setShowMenu(true)}>
               <Text style={styles.icon}>☰</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.iconButton}>
               <Text style={styles.icon}>🔔</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.iconButton}>
-              <Text style={styles.icon}>⚙</Text>
-            </TouchableOpacity>
           </View>
         </View>
 
-        {/* NAVIGATION MENU POPUP */}
-        {showMenu && (
-          <View style={styles.menuOverlay}>
-            <View style={styles.menuCard}>
-              <View style={styles.menuHeader}>
-                <Text style={styles.menuTitle}>📱 ALL SCREENS</Text>
-                <TouchableOpacity onPress={() => setShowMenu(false)}>
-                  <Text style={styles.menuClose}>✕</Text>
-                </TouchableOpacity>
-              </View>
-
-              <TouchableOpacity 
-                style={styles.menuItem}
-                onPress={() => { setShowMenu(false); router.push('/fault-detail'); }}
-              >
-                <Text style={styles.menuItemIcon}>⚡</Text>
-                <Text style={styles.menuItemText}>Fault Detail (Safety Checklist)</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={styles.menuItem}
-                onPress={() => { setShowMenu(false); router.push('/history'); }}
-              >
-                <Text style={styles.menuItemIcon}>📊</Text>
-                <Text style={styles.menuItemText}>History & Analytics</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={styles.menuItem}
-                onPress={() => { setShowMenu(false); router.push('/alerts'); }}
-              >
-                <Text style={styles.menuItemIcon}>⚠</Text>
-                <Text style={styles.menuItemText}>Safety Alerts</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={styles.menuItem}
-                onPress={() => { setShowMenu(false); router.push('/motor-health'); }}
-              >
-                <Text style={styles.menuItemIcon}>🔧</Text>
-                <Text style={styles.menuItemText}>Motor Health (PF Analysis)</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={styles.menuItem}
-                onPress={() => { setShowMenu(false); router.push('/circuit-analyser'); }}
-              >
-                <Text style={styles.menuItemIcon}>🤖</Text>
-                <Text style={styles.menuItemText}>Circuit Analyser (AI)</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={styles.menuItem}
-                onPress={() => { setShowMenu(false); router.push('/device-network'); }}
-              >
-                <Text style={styles.menuItemIcon}>📡</Text>
-                <Text style={styles.menuItemText}>Device & Network</Text>
-              </TouchableOpacity>
-
-              <View style={styles.menuDivider} />
-
-              <Text style={styles.menuNote}>
-                💡 Bottom nav also works: History, Alerts, Control, Settings
-              </Text>
-            </View>
-          </View>
-        )}
+        {/* Navigation Menu */}
+        <NavigationMenu 
+          visible={showMenu}
+          onClose={() => setShowMenu(false)}
+          currentScreen="/dashboard"
+        />
 
         {/* Live Data Summary */}
         <View style={styles.summaryCard}>
@@ -708,71 +645,5 @@ const styles = StyleSheet.create({
   },
   navLabelActive: {
     color: Colors.ACCENT_GREEN,
-  },
-  // Menu styles
-  menuOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(10, 14, 23, 0.95)',
-    zIndex: 1000,
-    padding: 20,
-    justifyContent: 'center',
-  },
-  menuCard: {
-    backgroundColor: Colors.BG_CARD,
-    borderRadius: 16,
-    padding: 24,
-    borderWidth: 2,
-    borderColor: Colors.ACCENT_GREEN,
-  },
-  menuHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 24,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.BORDER_COLOR,
-  },
-  menuTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: Colors.ACCENT_GREEN,
-  },
-  menuClose: {
-    fontSize: 28,
-    color: Colors.TEXT_SECONDARY,
-  },
-  menuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 16,
-    backgroundColor: Colors.BG_PRIMARY,
-    borderRadius: 12,
-    marginBottom: 12,
-  },
-  menuItemIcon: {
-    fontSize: 24,
-    marginRight: 16,
-  },
-  menuItemText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: Colors.TEXT_PRIMARY,
-    flex: 1,
-  },
-  menuDivider: {
-    height: 1,
-    backgroundColor: Colors.BORDER_COLOR,
-    marginVertical: 16,
-  },
-  menuNote: {
-    fontSize: 13,
-    color: Colors.TEXT_SECONDARY,
-    textAlign: 'center',
-    lineHeight: 20,
   },
 });
