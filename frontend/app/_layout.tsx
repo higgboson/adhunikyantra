@@ -18,6 +18,11 @@ export default function RootLayout() {
         <Stack.Screen name="wifi-setup" />
         <Stack.Screen name="auth" />
         <Stack.Screen name="dashboard" />
+        <Stack.Screen name="fault-detail" />
+        <Stack.Screen name="history" />
+        <Stack.Screen name="motor-health" />
+        <Stack.Screen name="circuit-analyser" />
+        <Stack.Screen name="device-network" />
       </Stack>
     </>
   );

@@ -157,7 +157,11 @@ export default function DashboardScreen() {
 
         {/* Fault Banner */}
         {activeFault && (
-          <TouchableOpacity style={styles.faultBanner} activeOpacity={0.8}>
+          <TouchableOpacity 
+            style={styles.faultBanner} 
+            activeOpacity={0.8}
+            onPress={() => router.push('/fault-detail')}
+          >
             <View style={styles.faultIcon}>
               <Text style={styles.faultIconText}>⚠</Text>
             </View>
@@ -286,7 +290,7 @@ export default function DashboardScreen() {
           <Text style={[styles.navLabel, styles.navLabelActive]}>Dashboard</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.navItem}>
+        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/history')}>
           <Text style={styles.navIcon}>📉</Text>
           <Text style={styles.navLabel}>History</Text>
         </TouchableOpacity>
@@ -301,7 +305,7 @@ export default function DashboardScreen() {
           <Text style={styles.navLabel}>Control</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.navItem}>
+        <TouchableOpacity style={styles.navItem} onPress={() => router.push('/device-network')}>
           <Text style={styles.navIcon}>⚙</Text>
           <Text style={styles.navLabel}>Settings</Text>
         </TouchableOpacity>
