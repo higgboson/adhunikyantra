@@ -1,0 +1,31 @@
+export const Colors = {
+  BG_PRIMARY: '#0A0E17',
+  BG_SECONDARY: '#131929',
+  BG_CARD: '#1A2332',
+
+  ACCENT_GREEN: '#00FF88',
+  ACCENT_CYAN: '#00D4FF',
+
+  WARNING_ORANGE: '#FF6B35',
+  DANGER_RED: '#FF3355',
+
+  TEXT_PRIMARY: '#E8F0FE',
+  TEXT_SECONDARY: '#7A8BA8',
+  TEXT_MUTED: '#556B88',
+
+  BORDER_COLOR: '#1E2D42',
+  BORDER_LIGHT: '#2A3A52',
+
+  STATUS_NORMAL: '#00FF88',
+  STATUS_WARNING: '#FF6B35',
+  STATUS_DANGER: '#FF3355',
+  STATUS_INFO: '#00D4FF',
+  STATUS_GRAY: '#7A8BA8',
+};
+
+export const Gradients = {
+  PRIMARY: ['#0A0E17', '#1A2332', '#0F1923'] as const,
+  CARD: ['#131929', '#1A2332'] as const,
+  DANGER: ['#FF3355', '#CC1144'] as const,
+  WARNING: ['#FF6B35', '#DD5525'] as const,
+};
