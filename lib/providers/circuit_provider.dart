@@ -7,7 +7,7 @@ import '../core/firebase_paths.dart';
 import '../models/circuit_model.dart';
 
 final circuitsProvider = StreamProvider<List<Circuit>>((ref) {
-  final deviceId = AppConstants.deviceId;
+  const deviceId = AppConstants.deviceId;
   final path = FirebasePaths.circuits(deviceId);
   
   return FirebaseDatabase.instance
@@ -64,7 +64,7 @@ final circuitsProvider = StreamProvider<List<Circuit>>((ref) {
 });
 
 final singleCircuitProvider = StreamProvider.family<Circuit, String>((ref, circuitId) {
-  final deviceId = AppConstants.deviceId;
+  const deviceId = AppConstants.deviceId;
   final path = FirebasePaths.circuit(deviceId, circuitId);
   
   return FirebaseDatabase.instance

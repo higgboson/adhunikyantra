@@ -135,7 +135,7 @@ class _CircuitControlScreenState extends ConsumerState<CircuitControlScreen> {
                         // Update min on time in EWMA config
                       },
                       child: Text(
-                        'Set ${selectedMinutes} Minutes',
+                        'Set $selectedMinutes Minutes',
                         style: AppTypography.dmSans(
                           size: 16,
                           weight: FontWeight.w600,

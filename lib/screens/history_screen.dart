@@ -163,9 +163,9 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
 
   Widget _buildEnergySummary(double rate) {
     // Mock data for demo
-    final todayKwh = 8.5;
+    const todayKwh = 8.5;
     final todayCost = todayKwh * rate;
-    final weekKwh = 58.3;
+    const weekKwh = 58.3;
     final weekCost = weekKwh * rate;
     final projectedMonthly = weekCost * 4.3;
     
@@ -388,7 +388,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
         drawVerticalLine: false,
         horizontalInterval: 50,
         getDrawingHorizontalLine: (value) {
-          return FlLine(
+          return const FlLine(
             color: AppColors.border,
             strokeWidth: 1,
           );
@@ -442,7 +442,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
         show: true,
         drawVerticalLine: false,
         getDrawingHorizontalLine: (value) {
-          return FlLine(
+          return const FlLine(
             color: AppColors.border,
             strokeWidth: 1,
           );

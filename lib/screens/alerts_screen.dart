@@ -68,11 +68,11 @@ class _AlertsCentreScreenState extends ConsumerState<AlertsCentreScreen> {
   }
 
   Widget _buildFilterTabs() {
-    final filters = AlertType.values;
+    const filters = AlertType.values;
     
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
+      decoration: const BoxDecoration(
         color: AppColors.cardBackground,
         border: Border(
           bottom: BorderSide(color: AppColors.border),

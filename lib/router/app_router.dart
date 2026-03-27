@@ -13,6 +13,7 @@ import '../screens/device_network_screen.dart';
 import '../screens/ewma_coach_screen.dart';
 import '../screens/motor_health_screen.dart';
 import '../screens/neutral_monitor_screen.dart';
+import '../screens/circuit_analyzer_screen.dart';
 import '../widgets/main_scaffold.dart';
 
 final router = GoRouter(
@@ -55,8 +56,8 @@ final router = GoRouter(
           builder: (context, state) => const AlertsCentreScreen(),
         ),
         GoRoute(
-          path: '/circuits',
-          builder: (context, state) => const CircuitControlScreen(),
+          path: '/board',
+          builder: (context, state) => const CircuitAnalyzerScreen(),
         ),
         GoRoute(
           path: '/settings',
@@ -90,6 +91,10 @@ final router = GoRouter(
     GoRoute(
       path: '/neutral-monitor',
       builder: (context, state) => const NeutralMonitorScreen(),
+    ),
+    GoRoute(
+      path: '/circuit-analyzer',
+      builder: (context, state) => const CircuitAnalyzerScreen(),
     ),
   ],
 );

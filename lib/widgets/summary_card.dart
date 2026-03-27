@@ -22,7 +22,7 @@ class SummaryCard extends StatelessWidget {
               Expanded(
                 child: _buildMetric(
                   'Voltage',
-                  '${liveData.voltage.toStringAsFixed(1)}',
+                  liveData.voltage.toStringAsFixed(1),
                   'V',
                   AppColors.getVoltageColor(liveData.voltage),
                   Icons.electric_bolt,
@@ -36,7 +36,7 @@ class SummaryCard extends StatelessWidget {
               Expanded(
                 child: _buildMetric(
                   'Total Power',
-                  '${liveData.totalPower.toStringAsFixed(0)}',
+                  liveData.totalPower.toStringAsFixed(0),
                   'W',
                   AppColors.primary,
                   Icons.offline_bolt,
@@ -50,7 +50,7 @@ class SummaryCard extends StatelessWidget {
               Expanded(
                 child: _buildMetric(
                   'Leakage',
-                  '${liveData.leakage.toStringAsFixed(1)}',
+                  liveData.leakage.toStringAsFixed(1),
                   'mA',
                   AppColors.getLeakageColor(liveData.leakage),
                   Icons.water_drop,

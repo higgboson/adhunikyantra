@@ -5,7 +5,7 @@ import '../core/firebase_paths.dart';
 import '../models/live_data_model.dart';
 
 final liveDataProvider = StreamProvider<LiveData>((ref) {
-  final deviceId = AppConstants.deviceId;
+  const deviceId = AppConstants.deviceId;
   final path = FirebasePaths.live(deviceId);
   
   return FirebaseDatabase.instance

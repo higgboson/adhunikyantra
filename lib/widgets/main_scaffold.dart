@@ -19,7 +19,7 @@ class _MainScaffoldState extends State<MainScaffold> {
     if (location.startsWith('/dashboard')) return 0;
     if (location.startsWith('/history')) return 1;
     if (location.startsWith('/alerts')) return 2;
-    if (location.startsWith('/circuits')) return 3;
+    if (location.startsWith('/board') || location.startsWith('/circuit-analyzer')) return 3;
     if (location.startsWith('/settings')) return 4;
     return 0;
   }
@@ -36,7 +36,7 @@ class _MainScaffoldState extends State<MainScaffold> {
         context.go('/alerts');
         break;
       case 3:
-        context.go('/circuits');
+        context.go('/board');
         break;
       case 4:
         context.go('/settings');
@@ -71,7 +71,7 @@ class _MainScaffoldState extends State<MainScaffold> {
                 _buildNavItem(Icons.dashboard_outlined, Icons.dashboard, 'Home', 0, currentIndex, context),
                 _buildNavItem(Icons.show_chart_outlined, Icons.show_chart, 'History', 1, currentIndex, context),
                 _buildNavItem(Icons.notifications_outlined, Icons.notifications, 'Alerts', 2, currentIndex, context),
-                _buildNavItem(Icons.electrical_services_outlined, Icons.electrical_services, 'Control', 3, currentIndex, context),
+                _buildNavItem(Icons.electric_bolt_outlined, Icons.electric_bolt, 'Board', 3, currentIndex, context),
                 _buildNavItem(Icons.settings_outlined, Icons.settings, 'Settings', 4, currentIndex, context),
               ],
             ),

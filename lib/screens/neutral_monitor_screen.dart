@@ -361,7 +361,7 @@ class NeutralMonitorScreen extends ConsumerWidget {
         show: true,
         drawVerticalLine: false,
         getDrawingHorizontalLine: (value) {
-          return FlLine(
+          return const FlLine(
             color: AppColors.border,
             strokeWidth: 1,
           );

@@ -63,7 +63,7 @@ class MotorHealthScreen extends ConsumerWidget {
 
   Widget _buildOverallHealthCard() {
     // Mock overall health score
-    final healthScore = 87;
+    const healthScore = 87;
     final color = healthScore > 80 
         ? AppColors.primary 
         : healthScore > 60 

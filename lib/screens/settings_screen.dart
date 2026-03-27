@@ -93,6 +93,12 @@ class SettingsScreen extends ConsumerWidget {
             subtitle: 'Live vs neutral current monitoring',
             onTap: () => context.push('/neutral-monitor'),
           ),
+          _buildSettingTile(
+            icon: Icons.analytics_outlined,
+            title: 'Circuit Analyzer',
+            subtitle: 'Upload and analyze your DB schedule',
+            onTap: () => context.push('/circuit-analyzer'),
+          ),
           
           const SizedBox(height: 24),
           

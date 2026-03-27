@@ -6,7 +6,7 @@ import '../core/firebase_paths.dart';
 import '../models/fault_model.dart';
 
 final activeFaultsProvider = StreamProvider<List<Fault>>((ref) {
-  final deviceId = AppConstants.deviceId;
+  const deviceId = AppConstants.deviceId;
   final path = FirebasePaths.faults(deviceId);
   
   return FirebaseDatabase.instance
@@ -37,7 +37,7 @@ final activeFaultsProvider = StreamProvider<List<Fault>>((ref) {
 });
 
 final allFaultsProvider = StreamProvider<List<Fault>>((ref) {
-  final deviceId = AppConstants.deviceId;
+  const deviceId = AppConstants.deviceId;
   final path = FirebasePaths.faults(deviceId);
   
   return FirebaseDatabase.instance
@@ -63,7 +63,7 @@ final allFaultsProvider = StreamProvider<List<Fault>>((ref) {
 });
 
 final faultByIdProvider = StreamProvider.family<Fault?, String>((ref, faultId) {
-  final deviceId = AppConstants.deviceId;
+  const deviceId = AppConstants.deviceId;
   final path = FirebasePaths.fault(deviceId, faultId);
   
   return FirebaseDatabase.instance

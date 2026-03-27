@@ -6,7 +6,7 @@ import '../core/firebase_paths.dart';
 import '../models/settings_model.dart';
 
 final settingsProvider = StreamProvider<Settings>((ref) {
-  final deviceId = AppConstants.deviceId;
+  const deviceId = AppConstants.deviceId;
   final path = FirebasePaths.settings(deviceId);
   
   return FirebaseDatabase.instance

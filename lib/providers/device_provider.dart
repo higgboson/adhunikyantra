@@ -9,7 +9,7 @@ import '../models/neutral_data_model.dart';
 
 // Device Info Provider
 final deviceInfoProvider = StreamProvider<DeviceInfo>((ref) {
-  final deviceId = AppConstants.deviceId;
+  const deviceId = AppConstants.deviceId;
   final path = FirebasePaths.deviceInfo(deviceId);
   
   return FirebaseDatabase.instance
@@ -26,7 +26,7 @@ final deviceInfoProvider = StreamProvider<DeviceInfo>((ref) {
 
 // EWMA Config Provider
 final ewmaConfigsProvider = StreamProvider<Map<String, EwmaConfig>>((ref) {
-  final deviceId = AppConstants.deviceId;
+  const deviceId = AppConstants.deviceId;
   final path = FirebasePaths.ewma(deviceId);
   
   return FirebaseDatabase.instance
@@ -56,7 +56,7 @@ final ewmaConfigsProvider = StreamProvider<Map<String, EwmaConfig>>((ref) {
 });
 
 final ewmaConfigProvider = StreamProvider.family<EwmaConfig, String>((ref, circuitId) {
-  final deviceId = AppConstants.deviceId;
+  const deviceId = AppConstants.deviceId;
   final path = FirebasePaths.ewmaCircuit(deviceId, circuitId);
   
   return FirebaseDatabase.instance
@@ -73,7 +73,7 @@ final ewmaConfigProvider = StreamProvider.family<EwmaConfig, String>((ref, circu
 
 // Neutral Monitor Provider
 final neutralDataProvider = StreamProvider<NeutralData>((ref) {
-  final deviceId = AppConstants.deviceId;
+  const deviceId = AppConstants.deviceId;
   final path = FirebasePaths.neutralMonitor(deviceId);
   
   return FirebaseDatabase.instance
