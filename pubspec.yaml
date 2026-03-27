@@ -33,6 +33,8 @@ dependencies:
   shimmer: ^3.0.0
   image_picker: ^1.0.7
   http: ^1.2.1
+  file_picker: ^8.0.0
+  pdf_render: ^1.4.12
 
 dev_dependencies:
   flutter_test:

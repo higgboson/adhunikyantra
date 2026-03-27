@@ -1,9 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:pdf_render/pdf_render.dart';
 import 'package:http/http.dart' as http;
 import 'package:firebase_database/firebase_database.dart';
 import '../core/theme.dart';
@@ -489,7 +492,7 @@ Write clearly for a non-technical person.''';
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                'Select Image Source',
+                'Select Source',
                 style: AppTypography.heading3,
               ),
               const SizedBox(height: 24),
@@ -510,6 +513,14 @@ Write clearly for a non-technical person.''';
                     onTap: () {
                       Navigator.pop(context);
                       _pickImage(ImageSource.gallery);
+                    },
+                  ),
+                  _buildSourceOption(
+                    icon: Icons.picture_as_pdf,
+                    label: 'PDF',
+                    onTap: () {
+                      Navigator.pop(context);
+                      _pickPDF();
                     },
                   ),
                 ],
@@ -556,6 +567,91 @@ Write clearly for a non-technical person.''';
         ),
       ),
     );
+  }
+
+  Future<void> _pickPDF() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['pdf'],
+        allowMultiple: false,
+      );
+
+      if (result != null && result.files.isNotEmpty) {
+        final file = result.files.first;
+        if (file.path != null) {
+          await _processPDF(file.path!);
+        }
+      }
+    } catch (e) {
+      _showError('Failed to pick PDF: $e');
+    }
+  }
+
+  Future<void> _processPDF(String filePath) async {
+    setState(() {
+      _isLoading = true;
+      _lastError = null;
+    });
+
+    try {
+      // Check internet connectivity
+      try {
+        final lookupResult = await InternetAddress.lookup('google.com');
+        setState(() {
+          _isOffline = lookupResult.isEmpty;
+        });
+      } catch (_) {
+        setState(() {
+          _isOffline = true;
+        });
+        throw Exception('No internet connection. Please check your network.');
+      }
+
+      // Open PDF document
+      final doc = await PdfDocument.openFile(filePath);
+      
+      if (doc.pageCount == 0) {
+        throw Exception('PDF appears to be empty');
+      }
+
+      // Process first page only (DB schedules are typically single page)
+      final page = await doc.getPage(1);
+      
+      // Render page to image with high quality
+      final pageImage = await page.render(
+        width: page.width * 2,
+        height: page.height * 2,
+        fullHeight: page.height * 2,
+      );
+      
+      final bytes = pageImage!.bytes;
+      await page.close();
+      await doc.close();
+
+      // Check if rendered image is valid
+      if (bytes.length < 10000) {
+        throw Exception('PDF appears to be blank or corrupted. Please try another file.');
+      }
+
+      final base64Image = base64Encode(bytes);
+
+      // Send to Claude API
+      final circuits = await _analyzeWithClaude(base64Image);
+
+      setState(() {
+        _circuits = circuits;
+        _isLoading = false;
+        _isRetrying = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+        _isRetrying = false;
+        _lastError = e.toString().replaceAll('Exception: ', '');
+      });
+      _showError(_lastError!);
+    }
   }
 
   Future<void> _processImage(XFile pickedFile) async {
@@ -970,7 +1066,7 @@ If any field is unknown use null.''';
           ),
           const SizedBox(height: 8),
           Text(
-            'Take a clear photo of your electrical distribution board schedule to analyze circuits',
+            'Take a photo or upload a PDF of your electrical distribution board schedule',
             style: AppTypography.bodySmall.copyWith(
               color: AppColors.textSecondary,
             ),
@@ -1006,8 +1102,8 @@ If any field is unknown use null.''';
           const SizedBox(height: 16),
           ElevatedButton.icon(
             onPressed: _showImageSourceDialog,
-            icon: const Icon(Icons.camera_alt, size: 18),
-            label: const Text('Upload Photo'),
+            icon: const Icon(Icons.upload_file, size: 18),
+            label: const Text('Upload Photo or PDF'),
           ),
         ],
       ],
