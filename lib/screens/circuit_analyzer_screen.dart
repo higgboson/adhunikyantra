@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
@@ -619,15 +620,17 @@ Write clearly for a non-technical person.''';
       final page = await doc.getPage(1);
       
       // Render page to image with high quality
-      final pageImage = await page.render(
-        width: page.width * 2,
-        height: page.height * 2,
-        fullHeight: page.height * 2,
-      );
+final pageImage = await page.render(
+  width: (page.width * 2).toInt(),    // or .round()
+  height: (page.height * 2).toInt(),  // or .round()
+  fullWidth: page.width * 2,          // This stays double if needed
+  fullHeight: page.height * 2,        // This stays double if needed
+);
       
-      final bytes = pageImage!.bytes;
-      await page.close();
-      await doc.close();
+      // Convert PdfPageImage to bytes via temporary file
+      final rawImageData = await pageImage.createImageIfNotAvailable();
+      final byteData = await rawImageData.toByteData(format: ui.ImageByteFormat.png);
+      final bytes = byteData!.buffer.asUint8List();
 
       // Check if rendered image is valid
       if (bytes.length < 10000) {
