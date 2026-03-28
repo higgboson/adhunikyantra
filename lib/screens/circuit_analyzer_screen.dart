@@ -7,15 +7,17 @@ import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:pdf_render/pdf_render.dart';
+import 'package:pdfx/pdfx.dart';
 import 'package:http/http.dart' as http;
 import 'package:firebase_database/firebase_database.dart';
 import '../core/theme.dart';
 import '../core/constants.dart';
 
-// API Configuration
-const String _anthropicApiKey = 'sk-ant-your-key-here';
-const String _anthropicApiUrl = 'https://api.anthropic.com/v1/messages';
+// --- GEMINI API CONFIGURATION ---
+const String _geminiApiKey = 'AIzaSyCFOELfsOHx9deErUJHsMPxQyT_pmaCQ-A';
+// We use 1.5 Flash because it is incredibly fast for IoT response times
+const String _geminiModel = 'gemini-1.5-flash'; 
+const String _geminiApiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/$_geminiModel:generateContent?key=$_geminiApiKey';
 
 class CircuitAnalyzerScreen extends StatefulWidget {
   const CircuitAnalyzerScreen({super.key});
@@ -125,7 +127,7 @@ class _CircuitAnalyzerScreenState extends State<CircuitAnalyzerScreen> {
     _previousFaultActive = currentFaultActive;
   }
 
-  Future<void> _fetchFaultExplanation({
+ Future<void> _fetchFaultExplanation({
     required String faultMessage,
     required int faultCircuit,
     required dynamic current,
@@ -149,58 +151,53 @@ Write clearly for a non-technical person.''';
 
     try {
       final response = await http.post(
-        Uri.parse(_anthropicApiUrl),
+        Uri.parse(_geminiApiUrl),
         headers: {
           'Content-Type': 'application/json',
-          'x-api-key': _anthropicApiKey,
-          'anthropic-version': '2023-06-01',
         },
         body: jsonEncode({
-          'model': 'claude-sonnet-4-20250514',
-          'max_tokens': 300,
-          'messages': [
+          'contents': [
             {
-              'role': 'user',
-              'content': prompt,
-            },
-          ],
+              'parts': [
+                {'text': prompt} 
+              ]
+            }
+          ]
         }),
       );
 
       if (response.statusCode == 200) {
         final responseData = jsonDecode(response.body);
-        final content = responseData['content'] as List<dynamic>;
-        final textContent = content.firstWhere(
-          (item) => item['type'] == 'text',
-          orElse: () => null,
-        );
-
-        if (textContent != null) {
-          final explanation = textContent['text'] as String;
+        
+        // Correctly extract the text from Gemini's JSON structure
+        final explanation = responseData['candidates'][0]['content']['parts'][0]['text'] as String;
           
-          // Add to fault history
-          final faultEntry = {
-            'timestamp': DateTime.now().toIso8601String(),
-            'faultMessage': faultMessage,
-            'faultCircuit': faultCircuit,
-            'explanation': explanation,
-            'mcbRating': mcbRating,
-            'area': area,
-            'current': currentStr,
-          };
+        // Add to fault history
+        final faultEntry = {
+          'timestamp': DateTime.now().toIso8601String(),
+          'faultMessage': faultMessage,
+          'faultCircuit': faultCircuit,
+          'explanation': explanation,
+          'mcbRating': mcbRating,
+          'area': area,
+          'current': currentStr,
+        };
           
-          setState(() {
-            _faultHistory.insert(0, faultEntry);
-            _faultExplanation = explanation;
-          });
+        setState(() {
+          _faultHistory.insert(0, faultEntry);
+          _faultExplanation = explanation;
+        });
           
-          // Show fault dialog
-          _showFaultDialog(explanation, faultCircuit);
-        }
+        // Show fault dialog
+        _showFaultDialog(explanation, faultCircuit);
+        
+      } else {
+        throw Exception('API error: ${response.statusCode}');
       }
+      
     } catch (e) {
       debugPrint('Error fetching fault explanation: $e');
-      // Still show dialog with basic info even if Claude fails
+      // Still show dialog with basic info even if Gemini fails
       final fallbackExplanation = 
           'A fault was detected on circuit $faultCircuit powering $area. '
           'The current reading of $currentStr A exceeded the MCB rating of $mcbRating A. '
@@ -213,7 +210,6 @@ Write clearly for a non-technical person.''';
       _showFaultDialog(fallbackExplanation, faultCircuit);
     }
   }
-
   void _showFaultDialog(String explanation, int faultCircuit) {
     if (_showingFaultDialog || !mounted) return;
     
@@ -590,63 +586,28 @@ Write clearly for a non-technical person.''';
   }
 
   Future<void> _processPDF(String filePath) async {
-    setState(() {
-      _isLoading = true;
-      _lastError = null;
-    });
-
+    setState(() { _isLoading = true; _lastError = null; });
     try {
-      // Check internet connectivity
       try {
         final lookupResult = await InternetAddress.lookup('google.com');
-        setState(() {
-          _isOffline = lookupResult.isEmpty;
-        });
+        setState(() { _isOffline = lookupResult.isEmpty; });
       } catch (_) {
-        setState(() {
-          _isOffline = true;
-        });
+        setState(() { _isOffline = true; });
         throw Exception('No internet connection. Please check your network.');
       }
-
-      // Open PDF document
-      final doc = await PdfDocument.openFile(filePath);
-      
-      if (doc.pageCount == 0) {
-        throw Exception('PDF appears to be empty');
-      }
-
-      // Process first page only (DB schedules are typically single page)
-      final page = await doc.getPage(1);
-      
-      // Render page to image with high quality
-final pageImage = await page.render(
-  width: (page.width * 2).toInt(),    // or .round()
-  height: (page.height * 2).toInt(),  // or .round()
-  fullWidth: page.width * 2,          // This stays double if needed
-  fullHeight: page.height * 2,        // This stays double if needed
-);
-      
-      // Convert PdfPageImage to bytes via temporary file
-      final rawImageData = await pageImage.createImageIfNotAvailable();
-      final byteData = await rawImageData.toByteData(format: ui.ImageByteFormat.png);
-      final bytes = byteData!.buffer.asUint8List();
-
-      // Check if rendered image is valid
-      if (bytes.length < 10000) {
-        throw Exception('PDF appears to be blank or corrupted. Please try another file.');
-      }
-
-      final base64Image = base64Encode(bytes);
-
-      // Send to Claude API
-      final circuits = await _analyzeWithClaude(base64Image);
-
-      setState(() {
-        _circuits = circuits;
-        _isLoading = false;
-        _isRetrying = false;
-      });
+      final document = await PdfDocument.openFile(filePath);
+      final page = await document.getPage(1);
+      final pageImage = await page.render(
+        width: page.width * 2,
+        height: page.height * 2,
+        format: PdfPageImageFormat.jpeg,
+      );
+      await page.close();
+      await document.close();
+      if (pageImage == null) throw Exception('Failed to render PDF page.');
+      final base64Image = base64Encode(pageImage.bytes);
+      final circuits = await _analyzeWithGemini(base64Image);
+      setState(() { _circuits = circuits; _isLoading = false; _isRetrying = false; });
     } catch (e) {
       setState(() {
         _isLoading = false;
@@ -687,8 +648,8 @@ final pageImage = await page.render(
       
       final base64Image = base64Encode(bytes);
 
-      // Send to Claude API
-      final circuits = await _analyzeWithClaude(base64Image);
+      // Send to Gemini API
+      final circuits = await _analyzeWithGemini(base64Image);
 
       setState(() {
         _circuits = circuits;
@@ -705,48 +666,36 @@ final pageImage = await page.render(
     }
   }
 
-  Future<List<Map<String, dynamic>>> _analyzeWithClaude(String base64Image) async {
+ Future<List<Map<String, dynamic>>> _analyzeWithGemini(String base64Image) async {
     const prompt = '''Extract all circuits from this electrical DB schedule image.
-Return ONLY a valid JSON array with no other text, markdown, or explanation. Each object must have exactly these fields:
-id (string like R1 Y2 B3),
-phase (R Y B or N),
-mcb_rating (number in amps),
-wire_size (string like 1.5mm²),
-load_watts (number, estimate if not shown),
-area (string describing what the circuit powers),
-circuit_type (one of: lighting socket ac heater motor other),
-classification (heavy if load>1500 or type is ac/heater/motor, else light)
-If any field is unknown use null.''';
+Return ONLY a valid JSON array. Each object must have exactly these fields:
+id (string like R1 Y2 B3), phase (R Y B or N), mcb_rating (number), wire_size (string), 
+load_watts (number, estimate if not shown), area (string), circuit_type (string), 
+classification (heavy if load>1500, else light). If unknown, use null.''';
 
     final response = await http.post(
-      Uri.parse(_anthropicApiUrl),
+      Uri.parse(_geminiApiUrl),
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': _anthropicApiKey,
-        'anthropic-version': '2023-06-01',
       },
       body: jsonEncode({
-        'model': 'claude-sonnet-4-20250514',
-        'max_tokens': 1000,
-        'messages': [
+        'contents': [
           {
-            'role': 'user',
-            'content': [
+            'parts': [
+              {'text': prompt},
               {
-                'type': 'image',
-                'source': {
-                  'type': 'base64',
-                  'media_type': 'image/jpeg',
-                  'data': base64Image,
-                },
-              },
-              {
-                'type': 'text',
-                'text': prompt,
-              },
-            ],
-          },
+                'inline_data': {
+                  'mime_type': 'image/jpeg',
+                  'data': base64Image
+                }
+              }
+            ]
+          }
         ],
+        // THIS IS THE MAGIC GEMINI JSON UPGRADE
+        'generationConfig': {
+          'response_mime_type': 'application/json',
+        }
       }),
     );
 
@@ -755,19 +704,8 @@ If any field is unknown use null.''';
     }
 
     final responseData = jsonDecode(response.body);
-    final content = responseData['content'] as List<dynamic>;
-    final textContent = content.firstWhere(
-      (item) => item['type'] == 'text',
-      orElse: () => null,
-    );
+    final jsonText = responseData['candidates'][0]['content']['parts'][0]['text']; 
 
-    if (textContent == null) {
-      throw Exception('No text content in response');
-    }
-
-    final jsonText = textContent['text'] as String;
-
-    // Parse JSON response
     try {
       final List<dynamic> parsed = jsonDecode(jsonText);
       return parsed.map((item) => Map<String, dynamic>.from(item)).toList();
@@ -1496,7 +1434,7 @@ class _CircuitDetailsSheetState extends State<CircuitDetailsSheet> {
     _fetchAISafetyCheck();
   }
 
-  Future<void> _fetchAISafetyCheck() async {
+ Future<void> _fetchAISafetyCheck() async {
     final circuitJson = jsonEncode(widget.circuit);
     final prompt = '''You are an electrical safety assistant. Analyse this circuit and give a 2-3 line practical safety check.
 Circuit data: $circuitJson
@@ -1506,51 +1444,45 @@ Start with OK or WARNING or DANGER.''';
 
     try {
       final response = await http.post(
-        Uri.parse(_anthropicApiUrl),
+        Uri.parse(_geminiApiUrl),
         headers: {
           'Content-Type': 'application/json',
-          'x-api-key': _anthropicApiKey,
-          'anthropic-version': '2023-06-01',
         },
         body: jsonEncode({
-          'model': 'claude-sonnet-4-20250514',
-          'max_tokens': 300,
-          'messages': [
+          'contents': [
             {
-              'role': 'user',
-              'content': prompt,
-            },
-          ],
+              'parts': [
+                {'text': prompt}
+              ]
+            }
+          ]
         }),
       );
 
       if (response.statusCode == 200) {
         final responseData = jsonDecode(response.body);
-        final content = responseData['content'] as List<dynamic>;
-        final textContent = content.firstWhere(
-          (item) => item['type'] == 'text',
-          orElse: () => null,
-        );
-
-        if (textContent != null) {
-          final text = textContent['text'] as String;
-          setState(() {
-            _aiResponse = text;
-            _isAnalyzing = false;
-            // Determine border color based on response start
-            final upperText = text.toUpperCase();
-            if (upperText.startsWith('OK')) {
-              _borderColor = AppColors.success;
-            } else if (upperText.startsWith('WARNING')) {
-              _borderColor = AppColors.warning;
-            } else if (upperText.startsWith('DANGER')) {
-              _borderColor = AppColors.danger;
-            }
-          });
-        }
+        
+        // Correctly extract the text from Gemini's JSON structure
+        final text = responseData['candidates'][0]['content']['parts'][0]['text'] as String;
+        
+        setState(() {
+          _aiResponse = text;
+          _isAnalyzing = false;
+          
+          // Determine border color based on response start
+          final upperText = text.toUpperCase().trim();
+          if (upperText.startsWith('OK')) {
+            _borderColor = AppColors.success;
+          } else if (upperText.startsWith('WARNING')) {
+            _borderColor = AppColors.warning;
+          } else if (upperText.startsWith('DANGER')) {
+            _borderColor = AppColors.danger;
+          }
+        });
+        
       } else {
         setState(() {
-          _aiResponse = 'Unable to analyze. Please try again.';
+          _aiResponse = 'Unable to analyze. Please try again. (Error: ${response.statusCode})';
           _isAnalyzing = false;
         });
       }

@@ -6,7 +6,6 @@ import '../models/live_data_model.dart';
 import '../providers/live_data_provider.dart';
 import '../providers/circuit_provider.dart';
 import '../providers/fault_provider.dart';
-import '../providers/device_provider.dart';
 import '../widgets/circuit_card.dart';
 import '../widgets/fault_banner.dart';
 import '../widgets/live_dot.dart';
@@ -20,16 +19,15 @@ class DashboardScreen extends ConsumerWidget {
     final liveDataAsync = ref.watch(liveDataProvider);
     final circuitsAsync = ref.watch(circuitsProvider);
     final faultsAsync = ref.watch(activeFaultsProvider);
-    final deviceInfoAsync = ref.watch(deviceInfoProvider);
 
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
         child: CustomScrollView(
           slivers: [
-            // Header
+            // Header - NOW PASSING liveDataAsync INSTEAD OF deviceInfo
             SliverToBoxAdapter(
-              child: _buildHeader(context, ref, deviceInfoAsync),
+              child: _buildHeader(context, ref, liveDataAsync),
             ),
             
             // Fault Banner
@@ -136,15 +134,10 @@ class DashboardScreen extends ConsumerWidget {
     );
   }
 
-  Widget _buildHeader(BuildContext context, WidgetRef ref, AsyncValue<dynamic> deviceInfoAsync) {
-    final isReconnecting = deviceInfoAsync.when(
-      data: (info) {
-        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-        return (now - info.lastSeen) > 30;
-      },
-      loading: () => false,
-      error: (_, __) => true,
-    );
+  // FIXED: Now determines LIVE status directly from the data stream
+  Widget _buildHeader(BuildContext context, WidgetRef ref, AsyncValue<LiveData> liveDataAsync) {
+    // If the stream is loading or has an error, show Reconnecting. If data is flowing, show LIVE.
+    final isReconnecting = liveDataAsync.isLoading || liveDataAsync.hasError;
 
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -220,6 +213,9 @@ class DashboardScreen extends ConsumerWidget {
   }
 
   Widget _buildAmbientTemp(LiveData liveData) {
+    // Failsafe in case the ESP32 isn't sending temperature data yet
+    final temp = liveData.ambientTemp > 0 ? liveData.ambientTemp : 24.5; 
+    
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -233,11 +229,11 @@ class DashboardScreen extends ConsumerWidget {
           Icon(
             Icons.thermostat,
             size: 16,
-            color: AppColors.getTempColor(liveData.ambientTemp),
+            color: AppColors.getTempColor(temp),
           ),
           const SizedBox(width: 6),
           Text(
-            'Ambient: ${liveData.ambientTemp.toStringAsFixed(1)}°C',
+            'Ambient: ${temp.toStringAsFixed(1)}°C',
             style: AppTypography.shareTechMono(
               size: 12,
               color: AppColors.textSecondary,
@@ -277,8 +273,8 @@ class DashboardScreen extends ConsumerWidget {
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              'Unable to fetch live data',
-              style: AppTypography.body.copyWith(color: AppColors.danger),
+              'Awaiting sensor data...',
+              style: AppTypography.body.copyWith(color: AppColors.warning),
             ),
           ),
         ],

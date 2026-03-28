@@ -2,7 +2,7 @@ class AppConstants {
   // App Info
   static const String appName = 'ADHUNIK YANTRA';
   static const String tagline = 'Smart Home. Safe Home.';
-  static const String deviceId = 'home_01';
+  static const String deviceId = 'device_001';
   
   // Timing
   static const Duration splashDuration = Duration(seconds: 2);

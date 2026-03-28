@@ -12,9 +12,17 @@ final liveDataProvider = StreamProvider<LiveData>((ref) {
       .ref(path)
       .onValue
       .map((event) {
-    if (event.snapshot.value != null) {
-      final data = Map<dynamic, dynamic>.from(event.snapshot.value as Map);
-      return LiveData.fromMap(data);
+    
+    // SAFEGUARD: Ensure the data exists AND is actually a Map/Dictionary
+    if (event.snapshot.value != null && event.snapshot.value is Map) {
+      try {
+        final data = Map<dynamic, dynamic>.from(event.snapshot.value as Map);
+        return LiveData.fromMap(data);
+      } catch (e) {
+        // If parsing fails for some reason, print it so we can see it in the terminal!
+        print("Error parsing live data: $e");
+        return LiveData(); 
+      }
     }
     return LiveData();
   });
@@ -27,9 +35,13 @@ final liveDataStreamProvider = StreamProvider.family<LiveData, String>((ref, dev
       .ref(path)
       .onValue
       .map((event) {
-    if (event.snapshot.value != null) {
-      final data = Map<dynamic, dynamic>.from(event.snapshot.value as Map);
-      return LiveData.fromMap(data);
+    if (event.snapshot.value != null && event.snapshot.value is Map) {
+      try {
+        final data = Map<dynamic, dynamic>.from(event.snapshot.value as Map);
+        return LiveData.fromMap(data);
+      } catch (e) {
+        return LiveData();
+      }
     }
     return LiveData();
   });
