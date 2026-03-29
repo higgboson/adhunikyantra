@@ -1,295 +1,525 @@
+// ============================================================
+//  ADHUNIK YANTRA — COMPLETE OCR CIRCUIT ANALYZER
+//  Works for: PDF (all pages) + Images (jpg/png)
+//  No API key for OCR. Groq API key needed for AI features.
+//
+//  pubspec.yaml — add these:
+//  google_mlkit_text_recognition: ^0.11.0
+//  pdfx: ^2.6.0
+//
+//  File: lib/screens/circuit_analyzer_screen.dart
+// ============================================================
+
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
-import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:pdfx/pdfx.dart';
 import 'package:http/http.dart' as http;
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:firebase_database/firebase_database.dart';
 import '../core/theme.dart';
 import '../core/constants.dart';
+import 'dart:typed_data';
 
-// --- GEMINI API CONFIGURATION ---
-const String _geminiApiKey = 'AIzaSyCFOELfsOHx9deErUJHsMPxQyT_pmaCQ-A';
-// We use 1.5 Flash because it is incredibly fast for IoT response times
-const String _geminiModel = 'gemini-1.5-flash'; 
-const String _geminiApiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/$_geminiModel:generateContent?key=$_geminiApiKey';
+// ── Groq API for TEXT-ONLY responses (fault explanation, safety check)
+// Set your API key here or use environment variables
+const String _groqApiKey = 'YOUR_GROQ_API_KEY_HERE';
+const String _groqUrl = 'https://api.groq.com/openai/v1/chat/completions';
+const String _groqModel = 'llama-3.1-8b-instant';
 
+// ── Call Groq for text-only AI responses
+Future<String> _callGroq(String prompt) async {
+  try {
+    final response = await http.post(
+      Uri.parse(_groqUrl),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $_groqApiKey',
+      },
+      body: jsonEncode({
+        'model': _groqModel,
+        'messages': [
+          {'role': 'user', 'content': prompt}
+        ],
+        'max_tokens': 300,
+        'temperature': 0.2,
+      }),
+    ).timeout(const Duration(seconds: 10));
+
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      return data['choices'][0]['message']['content'] as String;
+    }
+    return _fallbackText(prompt);
+  } catch (_) {
+    return _fallbackText(prompt);
+  }
+}
+
+String _fallbackText(String prompt) {
+  if (prompt.contains('fault')) {
+    return 'A fault was detected on this circuit. Turn off the circuit breaker and check all connected appliances before resetting.';
+  }
+  return 'Circuit appears to be wired correctly based on available data. Ensure regular maintenance checks.';
+}
+
+// ════════════════════════════════════════════════════════════
+//  OCR ENGINE
+// ════════════════════════════════════════════════════════════
+class _OCREngine {
+  static final _recognizer = TextRecognizer(script: TextRecognitionScript.latin);
+
+  static Future<String> fromFile(String path) async {
+    final inputImage = InputImage.fromFilePath(path);
+    final result = await _recognizer.processImage(inputImage);
+    return result.text;
+  }
+
+  static Future<String> fromBytes(Uint8List bytes) async {
+    final tempDir = Directory.systemTemp;
+    final tempFile = File('${tempDir.path}/adhunik_ocr_${DateTime.now().millisecondsSinceEpoch}.jpg');
+    await tempFile.writeAsBytes(bytes);
+    try {
+      final text = await fromFile(tempFile.path);
+      return text;
+    } finally {
+      if (await tempFile.exists()) await tempFile.delete();
+    }
+  }
+
+  static void dispose() => _recognizer.close();
+}
+
+// ════════════════════════════════════════════════════════════
+//  CIRCUIT PARSER
+// ════════════════════════════════════════════════════════════
+class _CircuitParser {
+  static List<Map<String, dynamic>> parse(String fullText) {
+    final lines = fullText.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+    final circuits = <Map<String, dynamic>>[];
+    final phaseCounts = <String, int>{'R': 0, 'Y': 0, 'B': 0, 'N': 0};
+
+    for (final line in lines) {
+      if (_isNoiseLine(line)) continue;
+      final circuit = _parseOneLine(line, phaseCounts);
+      if (circuit != null) {
+        circuits.add(circuit);
+        final p = circuit['phase'] as String;
+        phaseCounts[p] = (phaseCounts[p] ?? 0) + 1;
+      }
+    }
+
+    if (circuits.isEmpty) {
+      final combined = _combineLines(lines);
+      for (final line in combined) {
+        if (_isNoiseLine(line)) continue;
+        final circuit = _parseOneLine(line, phaseCounts);
+        if (circuit != null) {
+          circuits.add(circuit);
+          final p = circuit['phase'] as String;
+          phaseCounts[p] = (phaseCounts[p] ?? 0) + 1;
+        }
+      }
+    }
+
+    return circuits;
+  }
+
+  static Map<String, dynamic>? _parseOneLine(String line, Map<String, int> phaseCounts) {
+    final mcbMatch = RegExp(r'\b(6|10|16|20|25|32|40|50|63|80|100)\s*[Aa](?:mp)?s?\b').firstMatch(line);
+    if (mcbMatch == null) return null;
+    final mcb = int.parse(mcbMatch.group(1)!);
+
+    String phase = 'R';
+    final phasePatterns = [
+      RegExp(r'\b([RrYyBb])\s*[-–]?\s*\d+\b'),
+      RegExp(r'[Pp]hase\s*[-:]?\s*([RrYyBb])\b'),
+      RegExp(r'\b([RrYyBb])\s*[Pp]hase\b'),
+      RegExp(r'^([RrYyBb])\b'),
+      RegExp(r'\b([RrYyBb])\b'),
+    ];
+
+    for (final p in phasePatterns) {
+      final m = p.firstMatch(line);
+      if (m != null) {
+        final candidate = (m.group(1) ?? '').toUpperCase();
+        if (['R', 'Y', 'B'].contains(candidate)) {
+          phase = candidate;
+          break;
+        }
+      }
+    }
+
+    String wireSize = _wireFromMCB(mcb);
+    final wireMatch = RegExp(r'(\d+\.?\d*)\s*(?:sq\.?\s*)?mm[²2]?', caseSensitive: false).firstMatch(line);
+    if (wireMatch != null) wireSize = '${wireMatch.group(1)}mm²';
+
+    int loadWatts = _loadFromMCB(mcb);
+    final wMatch = RegExp(r'(\d{2,4})\s*[Ww]\b').firstMatch(line);
+    final kwMatch = RegExp(r'(\d+\.?\d*)\s*[Kk][Ww]', caseSensitive: false).firstMatch(line);
+    if (wMatch != null) {
+      loadWatts = int.tryParse(wMatch.group(1)!) ?? loadWatts;
+    } else if (kwMatch != null) {
+      loadWatts = ((double.tryParse(kwMatch.group(1)!) ?? 0) * 1000).round();
+    }
+
+    final area = _extractArea(line);
+    final type = _inferType(area, loadWatts, mcb);
+    final classification = (loadWatts > 1500 || type == 'ac' || type == 'heater' || type == 'motor') ? 'heavy' : 'light';
+    final count = (phaseCounts[phase] ?? 0) + 1;
+    final id = '$phase$count';
+
+    return {
+      'id': id,
+      'phase': phase,
+      'mcb_rating': mcb,
+      'wire_size': wireSize,
+      'load_watts': loadWatts,
+      'area': area.isNotEmpty ? area : 'Circuit $id',
+      'circuit_type': type,
+      'classification': classification,
+    };
+  }
+
+  static List<String> _combineLines(List<String> lines) {
+    final combined = <String>[];
+    for (int i = 0; i < lines.length; i++) {
+      if (i < lines.length - 1) {
+        combined.add('${lines[i]} ${lines[i + 1]}');
+      }
+      combined.add(lines[i]);
+    }
+    return combined;
+  }
+
+  static bool _isNoiseLine(String line) {
+    if (line.length < 3) return true;
+    final upper = line.toUpperCase();
+    final headers = ['CIRCUIT SCHEDULE', 'DISTRIBUTION BOARD', 'DB SCHEDULE', 'ELECTRICAL SCHEDULE', 'SR NO', 'S.NO', 'SNO', 'DESCRIPTION', 'CIRCUIT NO', 'REMARKS', 'TOTAL LOAD', 'GRAND TOTAL', 'INCOMER', 'INCOMING', 'PAGE', 'DRAWING NO', 'PROJECT', 'REVISION', 'DATE', 'SCALE'];
+    for (final h in headers) {
+      if (upper.contains(h) && !RegExp(r'\d+\s*A').hasMatch(line)) return true;
+    }
+    if (!RegExp(r'[a-zA-Z]').hasMatch(line)) return true;
+    return false;
+  }
+
+  static String _extractArea(String line) {
+    String s = line
+        .replaceAll(RegExp(r'\b(6|10|16|20|25|32|40|50|63|80|100)\s*[Aa](?:mp)?s?\b'), '')
+        .replaceAll(RegExp(r'\b[RrYyBb]\d+\b'), '')
+        .replaceAll(RegExp(r'\d+\.?\d*\s*mm[²2]?', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\d{2,4}\s*[KkWw][Ww]?'), '')
+        .replaceAll(RegExp(r'\b(MCB|RCCB|MCCB|DP|SP|TPN|SPN|CU|AL|PVC|XLPE|SWA|NOs?|No\.?)\b', caseSensitive: false), '')
+        .replaceAll(RegExp(r'[|/\\_]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    s = s.replaceAll(RegExp(r'^[\d\s.\-:]+'), '').trim();
+    s = s.replaceAll(RegExp(r'[\d\s.\-:]+$'), '').trim();
+    if (s.isEmpty) return '';
+    return s.split(' ').where((w) => w.length > 1).map((w) => w[0].toUpperCase() + w.substring(1).toLowerCase()).join(' ');
+  }
+
+  static String _inferType(String area, int watts, int mcb) {
+    final a = area.toLowerCase();
+    if (a.contains('ac') || a.contains('air') || a.contains('split') || a.contains('cassette') || a.contains('fcu') || a.contains('vrf') || a.contains('vrv')) return 'ac';
+    if (a.contains('light') || a.contains('lamp') || a.contains('led') || a.contains('tube') || a.contains('downlight') || a.contains('fan') || a.contains('exhaust')) return 'lighting';
+    if (a.contains('geyser') || a.contains('heater') || a.contains('water heat') || a.contains('wh') || a.contains('boiler') || a.contains('solar')) return 'heater';
+    if (a.contains('pump') || a.contains('motor') || a.contains('lift') || a.contains('elevator') || a.contains('hoist')) return 'motor';
+    if (a.contains('inverter') || a.contains('ups') || a.contains('battery')) return 'inverter';
+    if (a.contains('socket') || a.contains('plug') || a.contains('outlet') || a.contains('power point') || a.contains('kitchen') || a.contains('wash') || a.contains('refriger') || a.contains('microwave') || a.contains('oven')) return 'socket';
+    if (mcb >= 20 && watts >= 800) return 'ac';
+    if (mcb <= 10) return 'lighting';
+    return 'socket';
+  }
+
+  static String _wireFromMCB(int mcb) {
+    if (mcb <= 6) return '1.0mm²';
+    if (mcb <= 10) return '1.5mm²';
+    if (mcb <= 16) return '2.5mm²';
+    if (mcb <= 20) return '4mm²';
+    if (mcb <= 32) return '6mm²';
+    if (mcb <= 40) return '10mm²';
+    return '16mm²';
+  }
+
+  static int _loadFromMCB(int mcb) => ((mcb * 0.7) * 230).round();
+}
+
+// ════════════════════════════════════════════════════════════
+//  MAIN SCREEN
+// ════════════════════════════════════════════════════════════
 class CircuitAnalyzerScreen extends StatefulWidget {
   const CircuitAnalyzerScreen({super.key});
-
   @override
   State<CircuitAnalyzerScreen> createState() => _CircuitAnalyzerScreenState();
 }
 
 class _CircuitAnalyzerScreenState extends State<CircuitAnalyzerScreen> {
-  final ImagePicker _imagePicker = ImagePicker();
+  final ImagePicker _picker = ImagePicker();
   List<Map<String, dynamic>> _circuits = [];
   bool _isLoading = false;
-  String? _faultMessage;
+  String? _lastError;
+  bool _isRetrying = false;
+  bool _isOffline = false;
   bool _faultActive = false;
   bool _previousFaultActive = false;
   int _faultCircuit = 0;
-  String? _faultExplanation;
+  String? _faultMessage;
   bool _showingFaultDialog = false;
-  final ScrollController _boardScrollController = ScrollController();
-  final GlobalKey _boardKey = GlobalKey();
   final List<Map<String, dynamic>> _faultHistory = [];
-  bool _isOffline = false;
-  String? _lastError;
-  bool _isRetrying = false;
+  String _ocrStatus = '';
 
-  Stream<Map<String, dynamic>> get _readingsStream {
-    return FirebaseDatabase.instance
-        .ref('${AppConstants.deviceId}/readings')
-        .onValue
-        .map((event) {
-      if (event.snapshot.value != null) {
-        return Map<String, dynamic>.from(event.snapshot.value as Map);
+  Stream<Map<String, dynamic>> get _readingsStream =>
+      FirebaseDatabase.instance.ref('${AppConstants.deviceId}/readings').onValue.map(
+          (e) => e.snapshot.value != null ? Map<String, dynamic>.from(e.snapshot.value as Map) : {});
+
+  @override
+  void dispose() {
+    _OCREngine.dispose();
+    super.dispose();
+  }
+
+  void _showSourcePicker() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.cardBackground,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Select Source', style: AppTypography.heading3),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _srcBtn(Icons.camera_alt, 'Camera', () { Navigator.pop(ctx); _pickImage(ImageSource.camera); }),
+                  _srcBtn(Icons.photo_library, 'Gallery', () { Navigator.pop(ctx); _pickImage(ImageSource.gallery); }),
+                  _srcBtn(Icons.picture_as_pdf, 'PDF', () { Navigator.pop(ctx); _pickPDF(); }),
+                  _srcBtn(Icons.edit_note, 'Manual', () { Navigator.pop(ctx); _showManualForm(); }),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _srcBtn(IconData icon, String label, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        width: 70,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.border)),
+        child: Column(children: [
+          Icon(icon, size: 28, color: AppColors.primary),
+          const SizedBox(height: 6),
+          Text(label, style: AppTypography.caption.copyWith(fontSize: 10), textAlign: TextAlign.center),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _pickImage(ImageSource source) async {
+    try {
+      final xfile = await _picker.pickImage(source: source, maxWidth: 2048, maxHeight: 2048, imageQuality: 90);
+      if (xfile == null) return;
+      await _processImageFile(xfile.path);
+    } catch (e) {
+      _showErr('Failed to pick image: \$e');
+    }
+  }
+
+  Future<void> _processImageFile(String path) async {
+    setState(() { _isLoading = true; _lastError = null; _ocrStatus = 'Reading image...'; });
+    try {
+      setState(() => _ocrStatus = 'Running OCR...');
+      final text = await _OCREngine.fromFile(path);
+      if (text.trim().isEmpty) throw Exception('No text found. Try better lighting.');
+      setState(() => _ocrStatus = 'Extracting circuits...');
+      final circuits = _CircuitParser.parse(text);
+      if (circuits.isEmpty) {
+        setState(() { _isLoading = false; _ocrStatus = ''; });
+        _showNoCircuitsDialog();
+        return;
       }
-      return {};
-    });
+      setState(() { _circuits = circuits; _isLoading = false; _ocrStatus = ''; });
+    } catch (e) {
+      setState(() { _isLoading = false; _lastError = e.toString().replaceAll('Exception: ', ''); _ocrStatus = ''; });
+      _showErr(_lastError!);
+    }
   }
 
-  void _onFaultDismissed() {
-    setState(() {
-      _faultMessage = null;
-      _faultActive = false;
-    });
+  Future<void> _pickPDF() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['pdf']);
+      if (result == null || result.files.isEmpty) return;
+      final path = result.files.first.path;
+      if (path == null) return;
+      await _processPDF(path);
+    } catch (e) {
+      _showErr('Failed to pick PDF: \$e');
+    }
   }
 
-  void _clearCircuits() {
+  Future<void> _processPDF(String path) async {
+    setState(() { _isLoading = true; _lastError = null; _ocrStatus = 'Opening PDF...'; });
+    try {
+      final doc = await PdfDocument.openFile(path);
+      final totalPages = doc.pagesCount;
+      final allText = StringBuffer();
+      for (int pageNum = 1; pageNum <= totalPages; pageNum++) {
+        setState(() => _ocrStatus = 'OCR page \$pageNum of \$totalPages...');
+        final page = await doc.getPage(pageNum);
+        final rendered = await page.render(width: page.width * 2, height: page.height * 2, format: PdfPageImageFormat.jpeg);
+        if (rendered != null) {
+          final text = await _OCREngine.fromBytes(rendered.bytes);
+          allText.writeln(text);
+        }
+      }
+      final combinedText = allText.toString();
+      if (combinedText.trim().isEmpty) throw Exception('No text found in PDF.');
+      final circuits = _CircuitParser.parse(combinedText);
+      if (circuits.isEmpty) {
+        setState(() { _isLoading = false; _ocrStatus = ''; });
+        _showNoCircuitsDialog();
+        return;
+      }
+      setState(() { _circuits = circuits; _isLoading = false; _ocrStatus = ''; });
+    } catch (e) {
+      setState(() { _isLoading = false; _lastError = e.toString().replaceAll('Exception: ', ''); _ocrStatus = ''; });
+      _showErr(_lastError!);
+    }
+  }
+
+  void _showNoCircuitsDialog() {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         backgroundColor: AppColors.cardBackground,
-        title: Text('Clear Board?', style: AppTypography.heading3),
-        content: Text(
-          'This will remove all circuit data. You can upload a new DB schedule.',
-          style: AppTypography.body,
-        ),
+        title: Text('No Circuits Found', style: AppTypography.heading3),
+        content: Text('Could not extract circuits. Add manually?', style: AppTypography.body),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text('Cancel', style: AppTypography.body),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Cancel', style: AppTypography.body)),
           ElevatedButton(
-            onPressed: () {
-              setState(() {
-                _circuits = [];
-                _lastError = null;
-              });
-              Navigator.pop(context);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.danger,
-            ),
-            child: Text(
-              'Clear',
-              style: AppTypography.dmSans(
-                weight: FontWeight.w600,
-                color: Colors.white,
-              ),
-            ),
+            onPressed: () { Navigator.pop(ctx); _showManualForm(); },
+            child: Text('Add Manually', style: AppTypography.dmSans(weight: FontWeight.w600)),
           ),
         ],
       ),
     );
   }
 
+  void _showManualForm() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.cardBackground,
+      builder: (ctx) => _ManualEntryForm(existingCircuits: _circuits, onDone: (newCircuits) => setState(() => _circuits = newCircuits)),
+    );
+  }
+
+  void _clearCircuits() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.cardBackground,
+        title: Text('Clear Board?', style: AppTypography.heading3),
+        content: Text('Remove all circuit data?', style: AppTypography.body),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Cancel', style: AppTypography.body)),
+          ElevatedButton(
+            onPressed: () { setState(() { _circuits = []; _lastError = null; }); Navigator.pop(ctx); },
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.danger),
+            child: Text('Clear', style: AppTypography.dmSans(weight: FontWeight.w600, color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showErr(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Row(children: [
+        const Icon(Icons.error_outline, color: Colors.white),
+        const SizedBox(width: 12),
+        Expanded(child: Text(msg, style: AppTypography.body.copyWith(color: Colors.white))),
+      ]),
+      backgroundColor: AppColors.danger,
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      margin: const EdgeInsets.all(16),
+    ));
+  }
+
   void _checkForNewFault(Map<String, dynamic> readings) {
     final currentFaultActive = readings['faultActive'] == true;
-    
-    // Detect transition from false to true
     if (currentFaultActive && !_previousFaultActive) {
-      final faultMessage = readings['faultMessage']?.toString() ?? 'Unknown fault';
-      final faultCircuit = (readings['faultCircuit'] as num?)?.toInt() ?? 0;
-      final current = readings['current$faultCircuit'] ?? 0.0;
-      
-      // Find circuit info
+      final faultMsg = readings['faultMessage']?.toString() ?? 'Unknown fault';
+      final faultCkt = (readings['faultCircuit'] as num?)?.toInt() ?? 0;
+      final current = readings['current\$faultCkt'] ?? 0.0;
       Map<String, dynamic>? circuitInfo;
-      if (faultCircuit > 0 && faultCircuit <= _circuits.length) {
-        circuitInfo = _circuits[faultCircuit - 1];
-      }
-      
-      _fetchFaultExplanation(
-        faultMessage: faultMessage,
-        faultCircuit: faultCircuit,
-        current: current,
-        circuitInfo: circuitInfo,
-      );
+      if (faultCkt > 0 && faultCkt <= _circuits.length) circuitInfo = _circuits[faultCkt - 1];
+      _fetchFaultExplanation(faultMessage: faultMsg, faultCircuit: faultCkt, current: current, circuitInfo: circuitInfo);
     }
-    
     _previousFaultActive = currentFaultActive;
   }
 
- Future<void> _fetchFaultExplanation({
-    required String faultMessage,
-    required int faultCircuit,
-    required dynamic current,
-    Map<String, dynamic>? circuitInfo,
-  }) async {
+  Future<void> _fetchFaultExplanation({required String faultMessage, required int faultCircuit, required dynamic current, Map<String, dynamic>? circuitInfo}) async {
     final mcbRating = circuitInfo?['mcb_rating']?.toString() ?? 'Unknown';
     final area = circuitInfo?['area']?.toString() ?? 'Unknown area';
     final currentStr = current is num ? current.toStringAsFixed(1) : 'Unknown';
-    
-    final prompt = '''Adhunik Yantra smart circuit monitor detected a fault.
-Fault type: $faultMessage
-Affected circuit: $faultCircuit
-Live current at fault: $currentStr A
-MCB rating: $mcbRating A
-Area powered by this circuit: $area
-
-In exactly 2 sentences explain:
-1. What likely caused this fault in simple terms
-2. What the homeowner should do right now
-Write clearly for a non-technical person.''';
-
-    try {
-      final response = await http.post(
-        Uri.parse(_geminiApiUrl),
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'contents': [
-            {
-              'parts': [
-                {'text': prompt} 
-              ]
-            }
-          ]
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        
-        // Correctly extract the text from Gemini's JSON structure
-        final explanation = responseData['candidates'][0]['content']['parts'][0]['text'] as String;
-          
-        // Add to fault history
-        final faultEntry = {
-          'timestamp': DateTime.now().toIso8601String(),
-          'faultMessage': faultMessage,
-          'faultCircuit': faultCircuit,
-          'explanation': explanation,
-          'mcbRating': mcbRating,
-          'area': area,
-          'current': currentStr,
-        };
-          
-        setState(() {
-          _faultHistory.insert(0, faultEntry);
-          _faultExplanation = explanation;
-        });
-          
-        // Show fault dialog
-        _showFaultDialog(explanation, faultCircuit);
-        
-      } else {
-        throw Exception('API error: ${response.statusCode}');
-      }
-      
-    } catch (e) {
-      debugPrint('Error fetching fault explanation: $e');
-      // Still show dialog with basic info even if Gemini fails
-      final fallbackExplanation = 
-          'A fault was detected on circuit $faultCircuit powering $area. '
-          'The current reading of $currentStr A exceeded the MCB rating of $mcbRating A. '
-          'Please check the connected appliances and turn off the circuit if needed.';
-      
-      setState(() {
-        _faultExplanation = fallbackExplanation;
-      });
-      
-      _showFaultDialog(fallbackExplanation, faultCircuit);
-    }
+    final prompt = '''Adhunik Yantra detected a fault.\nFault: \$faultMessage\nCircuit: \$faultCircuit\nCurrent: \$currentStr A\nMCB: \$mcbRating A\nArea: \$area\nExplain in 2 simple sentences what caused it and what the homeowner should do.''';
+    final explanation = await _callGroq(prompt);
+    final faultEntry = {'timestamp': DateTime.now().toIso8601String(), 'faultMessage': faultMessage, 'faultCircuit': faultCircuit, 'explanation': explanation, 'mcbRating': mcbRating, 'area': area, 'current': currentStr};
+    setState(() { _faultHistory.insert(0, faultEntry); _faultMessage = explanation; });
+    _showFaultDialog(explanation, faultCircuit);
   }
+
   void _showFaultDialog(String explanation, int faultCircuit) {
     if (_showingFaultDialog || !mounted) return;
-    
     _showingFaultDialog = true;
-    
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         backgroundColor: AppColors.cardBackground,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: [
-            Icon(Icons.warning_amber, color: AppColors.danger),
-            const SizedBox(width: 12),
-            Text(
-              '⚠ Fault Detected',
-              style: AppTypography.heading3.copyWith(color: AppColors.danger),
-            ),
-          ],
-        ),
+        title: Row(children: [
+          Icon(Icons.warning_amber, color: AppColors.danger),
+          const SizedBox(width: 12),
+          Text('⚠ Fault Detected', style: AppTypography.heading3.copyWith(color: AppColors.danger)),
+        ]),
         content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                explanation,
-                style: AppTypography.body,
-              ),
-              const SizedBox(height: 16),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.danger.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: AppColors.danger.withValues(alpha: 0.3)),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.electrical_services, color: AppColors.danger, size: 20),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Circuit $faultCircuit affected',
-                      style: AppTypography.bodySmall.copyWith(
-                        color: AppColors.danger,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(explanation, style: AppTypography.body),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: AppColors.danger.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.danger.withValues(alpha: 0.3))),
+              child: Row(children: [
+                Icon(Icons.electrical_services, color: AppColors.danger, size: 20),
+                const SizedBox(width: 8),
+                Text('Circuit \$faultCircuit affected', style: AppTypography.bodySmall.copyWith(color: AppColors.danger, fontWeight: FontWeight.w600)),
+              ]),
+            ),
+          ]),
         ),
         actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _showingFaultDialog = false;
-            },
-            child: Text(
-              'Dismiss',
-              style: AppTypography.body.copyWith(color: AppColors.textSecondary),
-            ),
-          ),
+          TextButton(onPressed: () { Navigator.pop(ctx); _showingFaultDialog = false; }, child: Text('Dismiss', style: AppTypography.body.copyWith(color: AppColors.textSecondary))),
           ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              _showingFaultDialog = false;
-              await _turnOffCircuit(faultCircuit);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.danger,
-              foregroundColor: Colors.white,
-            ),
-            child: Text(
-              'Turn Off Circuit',
-              style: AppTypography.dmSans(weight: FontWeight.w600),
-            ),
+            onPressed: () async { Navigator.pop(ctx); _showingFaultDialog = false; await _turnOffCircuit(faultCircuit); },
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.danger, foregroundColor: Colors.white),
+            child: Text('Turn Off Circuit', style: AppTypography.dmSans(weight: FontWeight.w600)),
           ),
         ],
       ),
@@ -298,26 +528,11 @@ Write clearly for a non-technical person.''';
 
   Future<void> _turnOffCircuit(int circuit) async {
     try {
-      final relayRef = FirebaseDatabase.instance
-          .ref('${AppConstants.deviceId}/relay/$circuit');
+      final relayRef = FirebaseDatabase.instance.ref('${AppConstants.deviceId}/relay/\$circuit');
       await relayRef.set(false);
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Circuit $circuit turned off remotely',
-              style: AppTypography.body.copyWith(color: Colors.white),
-            ),
-            backgroundColor: AppColors.success,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            margin: const EdgeInsets.all(16),
-          ),
-        );
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Circuit \$circuit turned off', style: AppTypography.body.copyWith(color: Colors.white)), backgroundColor: AppColors.success));
     } catch (e) {
-      _showError('Failed to turn off circuit: $e');
+      _showErr('Failed to turn off circuit: \$e');
     }
   }
 
@@ -326,413 +541,56 @@ Write clearly for a non-technical person.''';
       context: context,
       backgroundColor: AppColors.cardBackground,
       isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (context) => DraggableScrollableSheet(
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => DraggableScrollableSheet(
         expand: false,
         initialChildSize: 0.7,
-        minChildSize: 0.5,
-        maxChildSize: 0.9,
-        builder: (context, scrollController) {
-          return Column(
-            children: [
-              // Header
-              Container(
-                padding: const EdgeInsets.all(24),
-                decoration: BoxDecoration(
-                  border: Border(bottom: BorderSide(color: AppColors.border)),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.history, color: AppColors.primary, size: 28),
-                    const SizedBox(width: 12),
-                    Text(
-                      'Fault History',
-                      style: AppTypography.heading2,
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.close),
-                    ),
-                  ],
-                ),
-              ),
-              // List
-              Expanded(
-                child: _faultHistory.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.check_circle_outline,
-                              size: 64,
-                              color: AppColors.success.withValues(alpha: 0.5),
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              'No faults recorded',
-                              style: AppTypography.body.copyWith(
-                                color: AppColors.textSecondary,
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    : ListView.builder(
-                        controller: scrollController,
-                        padding: const EdgeInsets.all(16),
-                        itemCount: _faultHistory.length,
-                        itemBuilder: (context, index) {
-                          final fault = _faultHistory[index];
-                          final timestamp = DateTime.tryParse(fault['timestamp'] ?? '');
-                          
-                          return Container(
-                            margin: const EdgeInsets.only(bottom: 12),
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: AppColors.surface,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: AppColors.border),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 8,
-                                        vertical: 4,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: AppColors.danger.withValues(alpha: 0.15),
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: Text(
-                                        'Circuit ${fault['faultCircuit']}',
-                                        style: AppTypography.shareTechMono(
-                                          size: 12,
-                                          color: AppColors.danger,
-                                          weight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ),
-                                    const Spacer(),
-                                    Text(
-                                      timestamp != null
-                                          ? '${timestamp.day}/${timestamp.month}/${timestamp.year} ${timestamp.hour}:${timestamp.minute.toString().padLeft(2, '0')}'
-                                          : 'Unknown time',
-                                      style: AppTypography.caption.copyWith(
-                                        color: AppColors.textMuted,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 12),
-                                Text(
-                                  fault['faultMessage'] ?? 'Unknown fault',
-                                  style: AppTypography.body.copyWith(
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  fault['explanation'] ?? '',
-                                  style: AppTypography.bodySmall.copyWith(
-                                    color: AppColors.textSecondary,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-
-  Future<void> _pickImage(ImageSource source) async {
-    try {
-      final XFile? pickedFile = await _imagePicker.pickImage(
-        source: source,
-        maxWidth: 1920,
-        maxHeight: 1080,
-        imageQuality: 85,
-      );
-
-      if (pickedFile != null) {
-        await _processImage(pickedFile);
-      }
-    } catch (e) {
-      _showError('Failed to pick image: $e');
-    }
-  }
-
-  void _showImageSourceDialog() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: AppColors.cardBackground,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (context) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Select Source',
-                style: AppTypography.heading3,
-              ),
-              const SizedBox(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  _buildSourceOption(
-                    icon: Icons.camera_alt,
-                    label: 'Camera',
-                    onTap: () {
-                      Navigator.pop(context);
-                      _pickImage(ImageSource.camera);
-                    },
-                  ),
-                  _buildSourceOption(
-                    icon: Icons.photo_library,
-                    label: 'Gallery',
-                    onTap: () {
-                      Navigator.pop(context);
-                      _pickImage(ImageSource.gallery);
-                    },
-                  ),
-                  _buildSourceOption(
-                    icon: Icons.picture_as_pdf,
-                    label: 'PDF',
-                    onTap: () {
-                      Navigator.pop(context);
-                      _pickPDF();
-                    },
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-            ],
+        builder: (ctx, sc) => Column(children: [
+          Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))),
+            child: Row(children: [
+              Icon(Icons.history, color: AppColors.primary, size: 28),
+              const SizedBox(width: 12),
+              Text('Fault History', style: AppTypography.heading2),
+              const Spacer(),
+              IconButton(onPressed: () => Navigator.pop(ctx), icon: const Icon(Icons.close)),
+            ]),
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSourceOption({
-    required IconData icon,
-    required String label,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        width: 120,
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: AppColors.border),
-        ),
-        child: Column(
-          children: [
-            Icon(
-              icon,
-              size: 40,
-              color: AppColors.primary,
-            ),
-            const SizedBox(height: 12),
-            Text(
-              label,
-              style: AppTypography.body.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _pickPDF() async {
-    try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['pdf'],
-        allowMultiple: false,
-      );
-
-      if (result != null && result.files.isNotEmpty) {
-        final file = result.files.first;
-        if (file.path != null) {
-          await _processPDF(file.path!);
-        }
-      }
-    } catch (e) {
-      _showError('Failed to pick PDF: $e');
-    }
-  }
-
-  Future<void> _processPDF(String filePath) async {
-    setState(() { _isLoading = true; _lastError = null; });
-    try {
-      try {
-        final lookupResult = await InternetAddress.lookup('google.com');
-        setState(() { _isOffline = lookupResult.isEmpty; });
-      } catch (_) {
-        setState(() { _isOffline = true; });
-        throw Exception('No internet connection. Please check your network.');
-      }
-      final document = await PdfDocument.openFile(filePath);
-      final page = await document.getPage(1);
-      final pageImage = await page.render(
-        width: page.width * 2,
-        height: page.height * 2,
-        format: PdfPageImageFormat.jpeg,
-      );
-      await page.close();
-      await document.close();
-      if (pageImage == null) throw Exception('Failed to render PDF page.');
-      final base64Image = base64Encode(pageImage.bytes);
-      final circuits = await _analyzeWithGemini(base64Image);
-      setState(() { _circuits = circuits; _isLoading = false; _isRetrying = false; });
-    } catch (e) {
-      setState(() {
-        _isLoading = false;
-        _isRetrying = false;
-        _lastError = e.toString().replaceAll('Exception: ', '');
-      });
-      _showError(_lastError!);
-    }
-  }
-
-  Future<void> _processImage(XFile pickedFile) async {
-    setState(() {
-      _isLoading = true;
-      _lastError = null;
-    });
-
-    try {
-      // Check internet connectivity
-      try {
-        final result = await InternetAddress.lookup('google.com');
-        setState(() {
-          _isOffline = result.isEmpty;
-        });
-      } catch (_) {
-        setState(() {
-          _isOffline = true;
-        });
-        throw Exception('No internet connection. Please check your network.');
-      }
-
-      // Read image bytes and convert to base64
-      final bytes = await pickedFile.readAsBytes();
-      
-      // Check if image is too small (likely too dark/blurry)
-      if (bytes.length < 10000) {
-        throw Exception('Image appears too dark or blurry. Please retake with better lighting.');
-      }
-      
-      final base64Image = base64Encode(bytes);
-
-      // Send to Gemini API
-      final circuits = await _analyzeWithGemini(base64Image);
-
-      setState(() {
-        _circuits = circuits;
-        _isLoading = false;
-        _isRetrying = false;
-      });
-    } catch (e) {
-      setState(() {
-        _isLoading = false;
-        _isRetrying = false;
-        _lastError = e.toString().replaceAll('Exception: ', '');
-      });
-      _showError(_lastError!);
-    }
-  }
-
- Future<List<Map<String, dynamic>>> _analyzeWithGemini(String base64Image) async {
-    const prompt = '''Extract all circuits from this electrical DB schedule image.
-Return ONLY a valid JSON array. Each object must have exactly these fields:
-id (string like R1 Y2 B3), phase (R Y B or N), mcb_rating (number), wire_size (string), 
-load_watts (number, estimate if not shown), area (string), circuit_type (string), 
-classification (heavy if load>1500, else light). If unknown, use null.''';
-
-    final response = await http.post(
-      Uri.parse(_geminiApiUrl),
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        'contents': [
-          {
-            'parts': [
-              {'text': prompt},
-              {
-                'inline_data': {
-                  'mime_type': 'image/jpeg',
-                  'data': base64Image
-                }
-              }
-            ]
-          }
-        ],
-        // THIS IS THE MAGIC GEMINI JSON UPGRADE
-        'generationConfig': {
-          'response_mime_type': 'application/json',
-        }
-      }),
-    );
-
-    if (response.statusCode != 200) {
-      throw Exception('API error: ${response.statusCode} - ${response.body}');
-    }
-
-    final responseData = jsonDecode(response.body);
-    final jsonText = responseData['candidates'][0]['content']['parts'][0]['text']; 
-
-    try {
-      final List<dynamic> parsed = jsonDecode(jsonText);
-      return parsed.map((item) => Map<String, dynamic>.from(item)).toList();
-    } catch (e) {
-      throw Exception('Failed to parse JSON response: $e');
-    }
-  }
-
-  void _showError(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            const Icon(Icons.error_outline, color: Colors.white),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                message,
-                style: AppTypography.body.copyWith(color: Colors.white),
-              ),
-            ),
-          ],
-        ),
-        backgroundColor: AppColors.danger,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        margin: const EdgeInsets.all(16),
+          Expanded(
+            child: _faultHistory.isEmpty
+                ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    Icon(Icons.check_circle_outline, size: 64, color: AppColors.success.withValues(alpha: 0.5)),
+                    const SizedBox(height: 16),
+                    Text('No faults recorded', style: AppTypography.body.copyWith(color: AppColors.textSecondary)),
+                  ]))
+                : ListView.builder(
+                    controller: sc,
+                    padding: const EdgeInsets.all(16),
+                    itemCount: _faultHistory.length,
+                    itemBuilder: (ctx, i) {
+                      final fault = _faultHistory[i];
+                      final ts = DateTime.tryParse(fault['timestamp'] ?? '');
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.border)),
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Row(children: [
+                            Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: AppColors.danger.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(8)), child: Text('Circuit \${fault['faultCircuit']}', style: AppTypography.shareTechMono(size: 12, color: AppColors.danger, weight: FontWeight.bold))),
+                            const Spacer(),
+                            Text(ts != null ? '\${ts.day}/\${ts.month}/\${ts.year} \${ts.hour}:\${ts.minute.toString().padLeft(2, '0')}' : 'Unknown', style: AppTypography.caption.copyWith(color: AppColors.textMuted)),
+                          ]),
+                          const SizedBox(height: 12),
+                          Text(fault['faultMessage'] ?? 'Unknown fault', style: AppTypography.body.copyWith(fontWeight: FontWeight.w600)),
+                          const SizedBox(height: 8),
+                          Text(fault['explanation'] ?? '', style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary)),
+                        ]),
+                      );
+                    },
+                  ),
+          ),
+        ]),
       ),
     );
   }
@@ -740,112 +598,30 @@ classification (heavy if load>1500, else light). If unknown, use null.''';
   @override
   Widget build(BuildContext context) {
     return OrientationBuilder(
-      builder: (context, orientation) {
+      builder: (ctx, orientation) {
         final isLandscape = orientation == Orientation.landscape;
-        
         return Scaffold(
           backgroundColor: AppColors.background,
           appBar: AppBar(
             backgroundColor: AppColors.background,
             elevation: 0,
-            leading: IconButton(
-              onPressed: () => context.pop(),
-              icon: const Icon(
-                Icons.arrow_back_ios,
-                color: AppColors.textPrimary,
-              ),
-            ),
-            title: Text(
-              'Circuit Analyzer',
-              style: AppTypography.heading3,
-            ),
+            leading: IconButton(onPressed: () => context.pop(), icon: const Icon(Icons.arrow_back_ios, color: AppColors.textPrimary)),
+            title: Text('Circuit Analyzer', style: AppTypography.heading3),
             centerTitle: true,
             actions: [
-              IconButton(
-                onPressed: _circuits.isNotEmpty ? _clearCircuits : null,
-                icon: Icon(
-                  Icons.refresh,
-                  color: _circuits.isNotEmpty ? AppColors.textPrimary : AppColors.textMuted,
-                ),
-                tooltip: 'Clear and upload again',
-              ),
+              IconButton(onPressed: _circuits.isNotEmpty ? _clearCircuits : null, icon: Icon(Icons.refresh, color: _circuits.isNotEmpty ? AppColors.textPrimary : AppColors.textMuted)),
               IconButton(
                 onPressed: _showFaultHistory,
-                icon: Badge(
-                  isLabelVisible: _faultHistory.isNotEmpty,
-                  label: Text('${_faultHistory.length}'),
-                  child: const Icon(
-                    Icons.history,
-                    color: AppColors.textPrimary,
-                  ),
-                ),
-                tooltip: 'Fault History',
+                icon: Badge(isLabelVisible: _faultHistory.isNotEmpty, label: Text('\${_faultHistory.length}'), child: const Icon(Icons.history, color: AppColors.textPrimary)),
               ),
             ],
           ),
           body: SafeArea(
-            child: Stack(
-              children: [
-                isLandscape 
-                  ? _buildLandscapeLayout()
-                  : _buildPortraitLayout(),
-                
-                // Offline indicator
-                if (_isOffline)
-                  Positioned(
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    child: Container(
-                      color: AppColors.warning,
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.wifi_off, size: 16, color: Colors.white),
-                          const SizedBox(width: 8),
-                          Text(
-                            'No internet connection',
-                            style: AppTypography.caption.copyWith(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                
-                // Loading indicator
-                if (_isLoading)
-                  Container(
-                    color: AppColors.background.withValues(alpha: 0.8),
-                    child: Center(
-                      child: Container(
-                        padding: const EdgeInsets.all(24),
-                        decoration: BoxDecoration(
-                          color: AppColors.cardBackground,
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: AppColors.border),
-                        ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const CircularProgressIndicator(
-                              valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              'Analyzing DB Schedule...',
-                              style: AppTypography.body,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
+            child: Stack(children: [
+              isLandscape ? _buildLandscapeLayout() : _buildPortraitLayout(),
+              if (_isOffline) Positioned(top: 0, left: 0, right: 0, child: Container(color: AppColors.warning, padding: const EdgeInsets.symmetric(vertical: 8), child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [const Icon(Icons.wifi_off, size: 16, color: Colors.white), const SizedBox(width: 8), Text('No internet', style: AppTypography.caption.copyWith(color: Colors.white, fontWeight: FontWeight.w600))]))),
+              if (_isLoading) Container(color: AppColors.background.withValues(alpha: 0.8), child: Center(child: Container(padding: const EdgeInsets.all(24), decoration: BoxDecoration(color: AppColors.cardBackground, borderRadius: BorderRadius.circular(16), border: Border.all(color: AppColors.border)), child: Column(mainAxisSize: MainAxisSize.min, children: [const CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary)), const SizedBox(height: 16), Text(_ocrStatus.isNotEmpty ? _ocrStatus : 'Processing...', style: AppTypography.body)])))),
+            ]),
           ),
         );
       },
@@ -853,1096 +629,438 @@ classification (heavy if load>1500, else light). If unknown, use null.''';
   }
 
   Widget _buildPortraitLayout() {
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        _buildUploadSection(),
-        const SizedBox(height: 24),
-        _buildBoardWithStream(),
-        const SizedBox(height: 24),
-        _buildLiveStatusSection(),
-        const SizedBox(height: 100),
-      ],
-    );
+    return ListView(padding: const EdgeInsets.all(16), children: [
+      _buildUploadSection(),
+      const SizedBox(height: 24),
+      _buildBoardWithStream(),
+      const SizedBox(height: 100),
+    ]);
   }
 
   Widget _buildLandscapeLayout() {
-    return Row(
-      children: [
-        // Left side - Upload and controls
-        Expanded(
-          flex: 1,
-          child: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              _buildUploadSection(),
-              const SizedBox(height: 24),
-              _buildLiveStatusSection(),
-            ],
-          ),
-        ),
-        // Right side - Board
-        Expanded(
-          flex: 2,
-          child: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              _buildBoardWithStream(),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildBoardWithStream() {
-    return StreamBuilder<Map<String, dynamic>>(
-      stream: _readingsStream,
-      builder: (context, snapshot) {
-        final readings = snapshot.data ?? {};
-        final isConnected = snapshot.hasData;
-        
-        _checkForNewFault(readings);
-        
-        if (readings['faultActive'] == true && readings['faultMessage'] != null) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) {
-              setState(() {
-                _faultActive = true;
-                _faultMessage = readings['faultMessage']?.toString();
-                _faultCircuit = (readings['faultCircuit'] as num?)?.toInt() ?? 0;
-              });
-            }
-          });
-        }
-        
-        return _buildBoardSection(readings: readings, isConnected: isConnected);
-      },
-    );
+    return Row(children: [
+      Expanded(flex: 1, child: ListView(padding: const EdgeInsets.all(16), children: [_buildUploadSection(), const SizedBox(height: 24)])),
+      Expanded(flex: 2, child: ListView(padding: const EdgeInsets.all(16), children: [_buildBoardWithStream()])),
+    ]);
   }
 
   Widget _buildUploadSection() {
     final hasError = _lastError != null;
-    
     return Container(
       decoration: AppDecorations.card,
       child: InkWell(
-        onTap: hasError ? null : _showImageSourceDialog,
+        onTap: hasError ? null : _showSourcePicker,
         borderRadius: BorderRadius.circular(16),
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: _circuits.isEmpty
-            ? _buildEmptyState(hasError)
-            : _buildUploadedState(),
+          child: _circuits.isEmpty ? _buildEmptyState(hasError) : _buildUploadedState(),
         ),
       ),
     );
   }
 
   Widget _buildEmptyState(bool hasError) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Container(
-          width: 120,
-          height: 120,
-          decoration: BoxDecoration(
-            color: hasError 
-                ? AppColors.danger.withValues(alpha: 0.1)
-                : AppColors.primary.withValues(alpha: 0.1),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: hasError 
-                  ? AppColors.danger.withValues(alpha: 0.3)
-                  : AppColors.primary.withValues(alpha: 0.3),
-              width: 2,
-            ),
-          ),
-          child: Center(
-            child: Icon(
-              hasError ? Icons.error_outline : Icons.document_scanner_outlined,
-              size: 48,
-              color: hasError ? AppColors.danger : AppColors.primary,
-            ),
-          ),
-        ),
-        const SizedBox(height: 20),
-        if (hasError) ...[
-          Text(
-            'Upload Failed',
-            style: AppTypography.heading3.copyWith(
-              color: AppColors.danger,
-              fontSize: 18,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            _lastError!,
-            style: AppTypography.bodySmall.copyWith(
-              color: AppColors.textSecondary,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 16),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              ElevatedButton.icon(
-                onPressed: _isRetrying ? null : _retryUpload,
-                icon: _isRetrying 
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.refresh, size: 18),
-                label: Text(_isRetrying ? 'Retrying...' : 'Try Again'),
-              ),
-            ],
-          ),
-        ] else ...[
-          Text(
-            'Upload your DB Schedule',
-            style: AppTypography.heading3.copyWith(fontSize: 18),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Take a photo or upload a PDF of your electrical distribution board schedule',
-            style: AppTypography.bodySmall.copyWith(
-              color: AppColors.textSecondary,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 16),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppColors.border),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.lightbulb_outline, 
-                  size: 16, 
-                  color: AppColors.warning,
-                ),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text(
-                    'Tip: Ensure good lighting and capture all circuit details',
-                    style: AppTypography.caption.copyWith(
-                      color: AppColors.textMuted,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          ElevatedButton.icon(
-            onPressed: _showImageSourceDialog,
-            icon: const Icon(Icons.upload_file, size: 18),
-            label: const Text('Upload Photo or PDF'),
-          ),
-        ],
+    return Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Container(
+        width: 120, height: 120,
+        decoration: BoxDecoration(color: hasError ? AppColors.danger.withValues(alpha: 0.1) : AppColors.primary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(20), border: Border.all(color: hasError ? AppColors.danger.withValues(alpha: 0.3) : AppColors.primary.withValues(alpha: 0.3), width: 2)),
+        child: Center(child: Icon(hasError ? Icons.error_outline : Icons.document_scanner_outlined, size: 48, color: hasError ? AppColors.danger : AppColors.primary)),
+      ),
+      const SizedBox(height: 20),
+      if (hasError) ...[
+        Text('Upload Failed', style: AppTypography.heading3.copyWith(color: AppColors.danger, fontSize: 18)),
+        const SizedBox(height: 8),
+        Text(_lastError!, style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary), textAlign: TextAlign.center),
+        const SizedBox(height: 16),
+        ElevatedButton.icon(onPressed: _isRetrying ? null : () { setState(() { _lastError = null; _isRetrying = true; }); _showSourcePicker(); }, icon: _isRetrying ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.refresh, size: 18), label: Text(_isRetrying ? 'Retrying...' : 'Try Again')),
+      ] else ...[
+        Text('Upload DB Schedule', style: AppTypography.heading3.copyWith(fontSize: 18)),
+        const SizedBox(height: 8),
+        Text('Photo or PDF of your electrical distribution board', style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary), textAlign: TextAlign.center),
+        const SizedBox(height: 16),
+        ElevatedButton.icon(onPressed: _showSourcePicker, icon: const Icon(Icons.upload_file, size: 18), label: const Text('Upload')),
       ],
-    );
-  }
-
-  void _retryUpload() {
-    setState(() {
-      _lastError = null;
-      _isRetrying = true;
-    });
-    _showImageSourceDialog();
+    ]);
   }
 
   Widget _buildUploadedState() {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Container(
-          width: 64,
-          height: 64,
-          decoration: BoxDecoration(
-            color: AppColors.success.withValues(alpha: 0.2),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: const Icon(
-            Icons.check_circle,
-            color: AppColors.success,
-            size: 32,
-          ),
-        ),
-        const SizedBox(height: 16),
-        Text(
-          '${_circuits.length} Circuits Loaded',
-          style: AppTypography.heading3.copyWith(fontSize: 18),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Tap refresh to upload a new schedule',
-          style: AppTypography.bodySmall.copyWith(
-            color: AppColors.textSecondary,
-          ),
-          textAlign: TextAlign.center,
-        ),
-      ],
-    );
+    return Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Container(width: 64, height: 64, decoration: BoxDecoration(color: AppColors.success.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(16)), child: const Icon(Icons.check_circle, color: AppColors.success, size: 32)),
+      const SizedBox(height: 16),
+      Text('\${_circuits.length} Circuits Loaded', style: AppTypography.heading3.copyWith(fontSize: 18)),
+      const SizedBox(height: 8),
+      Text('Tap refresh to upload new schedule', style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary), textAlign: TextAlign.center),
+    ]);
   }
 
-  Widget _buildBoardSection({required Map<String, dynamic> readings, required bool isConnected}) {
-    return Column(
-      key: _boardKey,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 12),
-          child: Row(
-            children: [
-              Text(
-                'DB BOARD',
-                style: AppTypography.caption.copyWith(
-                  color: AppColors.primary,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 1,
-                ),
-              ),
-              const SizedBox(width: 12),
-              // Live Status Indicator
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isConnected 
-                      ? AppColors.success.withValues(alpha: 0.15)
-                      : AppColors.textMuted.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: isConnected 
-                        ? AppColors.success.withValues(alpha: 0.5)
-                        : AppColors.textMuted.withValues(alpha: 0.5),
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        color: isConnected ? AppColors.success : AppColors.textMuted,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      isConnected ? 'Live — Adhunik Yantra' : 'Offline',
-                      style: AppTypography.caption.copyWith(
-                        color: isConnected ? AppColors.success : AppColors.textMuted,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+  Widget _buildBoardWithStream() {
+    return StreamBuilder<Map<String, dynamic>>(
+      stream: _readingsStream,
+      builder: (ctx, snapshot) {
+        final readings = snapshot.data ?? {};
+        final isConnected = snapshot.hasData;
+        _checkForNewFault(readings);
+        if (readings['faultActive'] == true && readings['faultMessage'] != null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) setState(() { _faultActive = true; _faultMessage = readings['faultMessage']?.toString(); _faultCircuit = (readings['faultCircuit'] as num?)?.toInt() ?? 0; });
+          });
+        }
+        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Row(children: [
+              Text('DB BOARD', style: AppTypography.caption.copyWith(color: AppColors.primary, fontWeight: FontWeight.w600, letterSpacing: 1)),
+              const SizedBox(width: 10),
+              _liveChip(isConnected),
+            ]),
           ),
-        ),
-        _circuits.isEmpty
-            ? Container(
-                width: double.infinity,
-                height: 200,
-                decoration: AppDecorations.card,
-                child: Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.dashboard_outlined,
-                        size: 48,
-                        color: AppColors.textMuted,
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'Board will appear here after upload',
-                        style: AppTypography.body.copyWith(
-                          color: AppColors.textSecondary,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
-                  ),
-                ),
-              )
-            : DBBoardWidget(
-                circuits: _circuits,
-                readings: readings,
-                faultActive: _faultActive,
-                faultCircuit: _faultCircuit,
-                onCircuitTap: (circuit) => _showCircuitDetails(context, circuit),
-              ),
-      ],
-    );
-  }
-
-  void _showCircuitDetails(BuildContext context, Map<String, dynamic> circuit) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: AppColors.cardBackground,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (context) => CircuitDetailsSheet(circuit: circuit),
-    );
-  }
-
-  Widget _buildLiveStatusSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 12),
-          child: Text(
-            'LIVE STATUS',
-            style: AppTypography.caption.copyWith(
-              color: AppColors.primary,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 1,
-            ),
-          ),
-        ),
-        Container(
-          width: double.infinity,
-          height: 150,
-          decoration: AppDecorations.card,
-          child: Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  Icons.electric_bolt,
-                  size: 48,
-                  color: AppColors.textMuted,
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'Live readings from Adhunik Yantra',
-                  style: AppTypography.body.copyWith(
-                    color: AppColors.textSecondary,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class DBBoardWidget extends StatelessWidget {
-  final List<Map<String, dynamic>> circuits;
-  final Map<String, dynamic> readings;
-  final bool faultActive;
-  final int faultCircuit;
-  final Function(Map<String, dynamic>) onCircuitTap;
-
-  const DBBoardWidget({
-    super.key,
-    required this.circuits,
-    required this.readings,
-    required this.faultActive,
-    required this.faultCircuit,
-    required this.onCircuitTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final heavyCircuits = circuits
-        .where((c) => c['classification']?.toString().toLowerCase() == 'heavy')
-        .toList();
-    final lightCircuits = circuits
-        .where((c) => c['classification']?.toString().toLowerCase() != 'heavy')
-        .toList();
-
-    final totalLoadKw = circuits.fold<double>(
-      0,
-      (sum, c) => sum + ((c['load_watts'] as num?)?.toDouble() ?? 0),
-    ) / 1000;
-
-    return Container(
-      decoration: AppDecorations.card,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildHeaderStats(totalLoadKw, heavyCircuits.length, lightCircuits.length),
-          if (heavyCircuits.isNotEmpty)
-            _buildSection(
-              title: 'HEAVY CIRCUITS',
-              color: AppColors.warning,
-              circuits: heavyCircuits,
-              onTap: onCircuitTap,
-            ),
-          if (lightCircuits.isNotEmpty)
-            _buildSection(
-              title: 'LIGHT CIRCUITS',
-              color: AppColors.success,
-              circuits: lightCircuits,
-              onTap: onCircuitTap,
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildHeaderStats(double totalLoadKw, int heavyCount, int lightCount) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: AppColors.border)),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _buildStatItem(
-            label: 'Total Load',
-            value: '${totalLoadKw.toStringAsFixed(2)} kW',
-            icon: Icons.electric_bolt,
-          ),
-          Container(width: 1, height: 40, color: AppColors.border),
-          _buildStatItem(
-            label: 'Heavy',
-            value: heavyCount.toString(),
-            icon: Icons.warning_amber,
-            valueColor: AppColors.warning,
-          ),
-          Container(width: 1, height: 40, color: AppColors.border),
-          _buildStatItem(
-            label: 'Light',
-            value: lightCount.toString(),
-            icon: Icons.check_circle_outline,
-            valueColor: AppColors.success,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStatItem({
-    required String label,
-    required String value,
-    required IconData icon,
-    Color? valueColor,
-  }) {
-    return Column(
-      children: [
-        Row(
-          children: [
-            Icon(icon, size: 16, color: AppColors.textMuted),
-            const SizedBox(width: 4),
-            Text(label, style: AppTypography.caption),
-          ],
-        ),
-        const SizedBox(height: 4),
-        Text(
-          value,
-          style: AppTypography.shareTechMono(
-            size: 18,
-            weight: FontWeight.bold,
-            color: valueColor ?? AppColors.primary,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildSection({
-    required String title,
-    required Color color,
-    required List<Map<String, dynamic>> circuits,
-    required Function(Map<String, dynamic>) onTap,
-  }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.15),
-            border: Border(
-              bottom: BorderSide(color: color.withValues(alpha: 0.5), width: 2),
-            ),
-          ),
-          child: Text(
-            title,
-            style: AppTypography.caption.copyWith(
-              color: color,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.2,
-            ),
-          ),
-        ),
-        SizedBox(
-          height: 130,
-          child: ListView.builder(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.all(12),
-            itemCount: circuits.length,
-            itemBuilder: (context, index) {
-              final circuitIndex = index + 1; // circuit 1, 2, etc.
-              final isFaulted = faultActive && faultCircuit == circuitIndex;
-              final liveCurrent = readings['current$circuitIndex'] ?? 0.0;
-              return MCBCard(
-                circuit: circuits[index],
-                onTap: () => onTap(circuits[index]),
-                isFaulted: isFaulted,
-                liveCurrent: liveCurrent is num ? liveCurrent.toDouble() : 0.0,
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class CircuitDetailsSheet extends StatefulWidget {
-  final Map<String, dynamic> circuit;
-
-  const CircuitDetailsSheet({
-    super.key,
-    required this.circuit,
-  });
-
-  @override
-  State<CircuitDetailsSheet> createState() => _CircuitDetailsSheetState();
-}
-
-class _CircuitDetailsSheetState extends State<CircuitDetailsSheet> {
-  String _aiResponse = '';
-  bool _isAnalyzing = true;
-  Color _borderColor = AppColors.border;
-
-  @override
-  void initState() {
-    super.initState();
-    _fetchAISafetyCheck();
-  }
-
- Future<void> _fetchAISafetyCheck() async {
-    final circuitJson = jsonEncode(widget.circuit);
-    final prompt = '''You are an electrical safety assistant. Analyse this circuit and give a 2-3 line practical safety check.
-Circuit data: $circuitJson
-Cover: (1) is MCB rating appropriate for load, (2) is wire size adequate, (3) any safety concerns.
-Be concise. Write for a homeowner.
-Start with OK or WARNING or DANGER.''';
-
-    try {
-      final response = await http.post(
-        Uri.parse(_geminiApiUrl),
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'contents': [
-            {
-              'parts': [
-                {'text': prompt}
-              ]
-            }
-          ]
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = jsonDecode(response.body);
-        
-        // Correctly extract the text from Gemini's JSON structure
-        final text = responseData['candidates'][0]['content']['parts'][0]['text'] as String;
-        
-        setState(() {
-          _aiResponse = text;
-          _isAnalyzing = false;
-          
-          // Determine border color based on response start
-          final upperText = text.toUpperCase().trim();
-          if (upperText.startsWith('OK')) {
-            _borderColor = AppColors.success;
-          } else if (upperText.startsWith('WARNING')) {
-            _borderColor = AppColors.warning;
-          } else if (upperText.startsWith('DANGER')) {
-            _borderColor = AppColors.danger;
-          }
-        });
-        
-      } else {
-        setState(() {
-          _aiResponse = 'Unable to analyze. Please try again. (Error: ${response.statusCode})';
-          _isAnalyzing = false;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _aiResponse = 'Error analyzing circuit: $e';
-        _isAnalyzing = false;
-      });
-    }
-  }
-
-  Color _getPhaseColor(String? phase) {
-    switch (phase?.toUpperCase()) {
-      case 'R':
-        return const Color(0xFFFF4444);
-      case 'Y':
-        return const Color(0xFFFFC107);
-      case 'B':
-        return const Color(0xFF2196F3);
-      default:
-        return AppColors.textMuted;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final circuit = widget.circuit;
-    final phaseColor = _getPhaseColor(circuit['phase']?.toString());
-    
-    return DraggableScrollableSheet(
-      expand: false,
-      initialChildSize: 0.6,
-      minChildSize: 0.5,
-      maxChildSize: 0.9,
-      builder: (context, scrollController) {
-        return SingleChildScrollView(
-          controller: scrollController,
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Drag handle
-                Center(
-                  child: Container(
-                    width: 40,
-                    height: 4,
-                    margin: const EdgeInsets.only(bottom: 24),
-                    decoration: BoxDecoration(
-                      color: AppColors.textMuted,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                
-                // Header - Area name
-                Text(
-                  circuit['area']?.toString() ?? 'Unknown Area',
-                  style: AppTypography.heading2,
-                ),
-                const SizedBox(height: 16),
-                
-                // Chips row - MCB Rating, Wire Size, Load
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    _buildChip(
-                      icon: Icons.electrical_services,
-                      label: '${circuit['mcb_rating']?.toString() ?? '?'}A MCB',
-                      color: AppColors.primary,
-                    ),
-                    _buildChip(
-                      icon: Icons.cable,
-                      label: circuit['wire_size']?.toString() ?? 'Unknown wire',
-                      color: AppColors.secondary,
-                    ),
-                    _buildChip(
-                      icon: Icons.bolt,
-                      label: '${circuit['load_watts']?.toString() ?? '?'}W',
-                      color: AppColors.info,
-                    ),
-                    _buildChip(
-                      icon: Icons.circle,
-                      label: circuit['circuit_type']?.toString() ?? 'Unknown',
-                      color: phaseColor,
-                      isCircle: true,
-                    ),
-                    _buildChip(
-                      icon: Icons.power,
-                      label: 'Phase ${circuit['phase']?.toString() ?? '?'}',
-                      color: phaseColor,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  'AI SAFETY CHECK',
-                  style: AppTypography.caption.copyWith(
-                    color: AppColors.primary,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: AppColors.surface,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: _borderColor, width: 2),
-                  ),
-                  child: _isAnalyzing
-                      ? Row(
-                          children: [
-                            const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Text(
-                              'Analyzing circuit safety...',
-                              style: AppTypography.bodySmall,
-                            ),
-                          ],
-                        )
-                      : Text(_aiResponse, style: AppTypography.body),
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  'WIRING PATH',
-                  style: AppTypography.caption.copyWith(
-                    color: AppColors.primary,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                _buildWiringPath(),
-                const SizedBox(height: 24),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: AppColors.surface,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text('Circuit ID: ', style: AppTypography.bodySmall),
-                      Text(
-                        circuit['id']?.toString() ?? 'Unknown',
-                        style: AppTypography.shareTechMono(
-                          size: 14,
-                          color: AppColors.primary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 24),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: Text(
-                      'Close',
-                      style: AppTypography.dmSans(weight: FontWeight.w600),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-              ],
-            ),
-          ),
-        );
+          _circuits.isEmpty
+              ? Container(width: double.infinity, height: 160, decoration: AppDecorations.card, child: Center(child: Text('Board appears after upload', style: AppTypography.body.copyWith(color: AppColors.textSecondary))))
+              : _DBBoard(circuits: _circuits, readings: readings, faultActive: _faultActive, faultCircuit: _faultCircuit, onTap: _showCircuitDetails),
+        ]);
       },
     );
   }
 
-  Widget _buildChip({
-    required IconData icon,
-    required String label,
-    required Color color,
-    bool isCircle = false,
-  }) {
+  Widget _liveChip(bool connected) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          isCircle
-              ? Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-                )
-              : Icon(icon, size: 14, color: color),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: AppTypography.caption.copyWith(
-              color: color,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(color: (connected ? AppColors.success : AppColors.textMuted).withValues(alpha: 0.15), borderRadius: BorderRadius.circular(12), border: Border.all(color: (connected ? AppColors.success : AppColors.textMuted).withValues(alpha: 0.5))),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Container(width: 6, height: 6, decoration: BoxDecoration(color: connected ? AppColors.success : AppColors.textMuted, shape: BoxShape.circle)),
+        const SizedBox(width: 6),
+        Text(connected ? 'Live' : 'Offline', style: AppTypography.caption.copyWith(color: connected ? AppColors.success : AppColors.textMuted, fontWeight: FontWeight.w600)),
+      ]),
     );
   }
 
-  Widget _buildWiringPath() {
-    final steps = [
-      ('Incomer', AppColors.danger),
-      ('MCB', AppColors.textSecondary),
-      ('Conduit', AppColors.textSecondary),
-      ('Junction', AppColors.textSecondary),
-      ('Load', AppColors.success),
-    ];
+  void _showCircuitDetails(Map<String, dynamic> circuit) {
+    showModalBottomSheet(context: context, isScrollControlled: true, backgroundColor: AppColors.cardBackground, builder: (ctx) => _CircuitDetailSheet(circuit: circuit));
+  }
+}
 
-    return SizedBox(
-      height: 60,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: steps.length,
-        itemBuilder: (context, index) {
-          final (label, color) = steps[index];
-          final isLast = index == steps.length - 1;
+// ════════════════════════════════════════════════════════════
+//  DB BOARD WIDGET
+// ════════════════════════════════════════════════════════════
+class _DBBoard extends StatelessWidget {
+  final List<Map<String, dynamic>> circuits;
+  final Map<String, dynamic> readings;
+  final bool faultActive;
+  final int faultCircuit;
+  final Function(Map<String, dynamic>) onTap;
 
-          return Row(
-            children: [
-              Column(
-                children: [
-                  Container(
-                    width: 16,
-                    height: 16,
-                    decoration: BoxDecoration(
-                      color: color,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: AppColors.textPrimary, width: 2),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    label,
-                    style: AppTypography.caption.copyWith(
-                      fontSize: 9,
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                ],
-              ),
-              if (!isLast)
-                Container(
-                  width: 40,
-                  height: 1,
-                  margin: const EdgeInsets.only(bottom: 12),
-                  child: CustomPaint(
-                    size: const Size(40, 1),
-                    painter: DashedLinePainter(),
-                  ),
-                ),
-            ],
-          );
-        },
-      ),
+  const _DBBoard({required this.circuits, required this.readings, required this.faultActive, required this.faultCircuit, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final heavy = circuits.where((c) => c['classification']?.toString() == 'heavy').toList();
+    final light = circuits.where((c) => c['classification']?.toString() != 'heavy').toList();
+    final totalKw = circuits.fold<double>(0, (s, c) => s + ((c['load_watts'] as num?)?.toDouble() ?? 0)) / 1000;
+
+    return Container(
+      decoration: AppDecorations.card,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
+            _stat('Total Load', '\${totalKw.toStringAsFixed(1)} kW', AppColors.primary),
+            Container(width: 1, height: 36, color: AppColors.border),
+            _stat('Heavy', '\${heavy.length}', AppColors.warning),
+            Container(width: 1, height: 36, color: AppColors.border),
+            _stat('Light', '\${light.length}', AppColors.success),
+          ]),
+        ),
+        Divider(color: AppColors.border, height: 1),
+        if (heavy.isNotEmpty) _section('HEAVY', AppColors.warning, heavy),
+        if (light.isNotEmpty) _section('LIGHT', AppColors.success, light),
+      ]),
     );
   }
-}
 
-class DashedLinePainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = AppColors.textMuted
-      ..strokeWidth = 1;
+  Widget _stat(String label, String val, Color color) => Column(children: [
+    Text(label, style: AppTypography.caption),
+    const SizedBox(height: 2),
+    Text(val, style: AppTypography.shareTechMono(size: 16, weight: FontWeight.bold, color: color)),
+  ]);
 
-    const dashWidth = 4.0;
-    const dashSpace = 4.0;
-    double startX = 0;
-
-    while (startX < size.width) {
-      canvas.drawLine(
-        Offset(startX, size.height / 2),
-        Offset(startX + dashWidth, size.height / 2),
-        paint,
-      );
-      startX += dashWidth + dashSpace;
-    }
+  Widget _section(String title, Color color, List<Map<String, dynamic>> items) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Container(width: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6), color: color.withValues(alpha: 0.1), child: Text(title, style: AppTypography.caption.copyWith(color: color, fontWeight: FontWeight.w700, letterSpacing: 1.2))),
+      Padding(
+        padding: const EdgeInsets.all(10),
+        child: Wrap(
+          spacing: 8, runSpacing: 8,
+          children: items.asMap().entries.map((e) {
+            final idx = e.key + 1;
+            final isFault = faultActive && faultCircuit == idx;
+            final liveCur = (readings['current\$idx'] as num?)?.toDouble() ?? 0.0;
+            return MCBCard(circuit: e.value, onTap: () => onTap(e.value), isFaulted: isFault, liveCurrent: liveCur);
+          }).toList(),
+        ),
+      ),
+    ]);
   }
-
-  @override
-  bool shouldRepaint(CustomPainter oldDelegate) => false;
 }
 
+// ════════════════════════════════════════════════════════════
+//  MCB CARD
+// ════════════════════════════════════════════════════════════
 class MCBCard extends StatelessWidget {
   final Map<String, dynamic> circuit;
   final VoidCallback onTap;
   final bool isFaulted;
   final double liveCurrent;
 
-  const MCBCard({
-    super.key,
-    required this.circuit,
-    required this.onTap,
-    this.isFaulted = false,
-    this.liveCurrent = 0.0,
-  });
+  const MCBCard({super.key, required this.circuit, required this.onTap, this.isFaulted = false, this.liveCurrent = 0.0});
 
-  Color _getPhaseColor(String? phase) {
-    switch (phase?.toUpperCase()) {
-      case 'R':
-        return const Color(0xFFFF4444);
-      case 'Y':
-        return const Color(0xFFFFC107);
-      case 'B':
-        return const Color(0xFF2196F3);
-      default:
-        return AppColors.textMuted;
-    }
+  Color _phaseColor(String? p) {
+    switch (p?.toUpperCase()) { case 'R': return const Color(0xFFFF4444); case 'Y': return const Color(0xFFFFC107); case 'B': return const Color(0xFF2196F3); default: return Colors.grey; }
   }
 
   @override
   Widget build(BuildContext context) {
-    final phaseColor = _getPhaseColor(circuit['phase']?.toString());
-    final mcbRating = circuit['mcb_rating']?.toString() ?? '?';
-    final area = circuit['area']?.toString() ?? 'Unknown';
+    final pc = _phaseColor(circuit['phase']?.toString());
+    final mcb = circuit['mcb_rating']?.toString() ?? '?';
+    final area = circuit['area']?.toString() ?? '';
     final id = circuit['id']?.toString() ?? '?';
 
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 300),
-        width: 80,
-        height: 110,
-        margin: const EdgeInsets.only(right: 12),
+        width: 72,
         decoration: BoxDecoration(
-          color: isFaulted 
-              ? AppColors.danger.withValues(alpha: 0.3)
-              : AppColors.surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isFaulted ? AppColors.danger : AppColors.border,
-            width: isFaulted ? 2 : 1,
-          ),
+          color: isFaulted ? AppColors.danger.withValues(alpha: 0.2) : AppColors.surface,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: isFaulted ? AppColors.danger : AppColors.border, width: isFaulted ? 1.5 : 1),
         ),
-        child: Stack(
-          children: [
-            // Pulsing border animation for fault
-            if (isFaulted)
-              Positioned.fill(
-                child: TweenAnimationBuilder<double>(
-                  tween: Tween(begin: 0.0, end: 1.0),
-                  duration: const Duration(milliseconds: 1000),
-                  curve: Curves.easeInOut,
-                  builder: (context, value, child) {
-                    return Container(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: AppColors.danger.withValues(alpha: 0.3 + (0.4 * value)),
-                          width: 2 + (2 * value),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            Column(
-              children: [
-                Container(
-                  width: double.infinity,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: phaseColor,
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(12),
-                      topRight: Radius.circular(12),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '${mcbRating}A',
-                  style: AppTypography.shareTechMono(
-                    size: 20,
-                    weight: FontWeight.bold,
-                    color: isFaulted ? AppColors.danger : AppColors.primary,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                // Live current reading
-                Text(
-                  '${liveCurrent.toStringAsFixed(1)}A live',
-                  style: AppTypography.shareTechMono(
-                    size: 9,
-                    color: AppColors.success,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Text(
-                    area,
-                    style: AppTypography.caption.copyWith(fontSize: 9),
-                    textAlign: TextAlign.center,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const Spacer(),
-                // FAULT badge
-                if (isFaulted)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: AppColors.danger,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      'FAULT',
-                      style: AppTypography.caption.copyWith(
-                        fontSize: 8,
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  )
-                else
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: AppColors.background,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      id,
-                      style: AppTypography.shareTechMono(
-                        size: 10,
-                        color: AppColors.textSecondary,
-                      ),
-                    ),
-                  ),
-                const SizedBox(height: 6),
-              ],
-            ),
-          ],
+        child: Column(children: [
+          Container(height: 6, decoration: BoxDecoration(color: pc, borderRadius: const BorderRadius.vertical(top: Radius.circular(10)))),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+            child: Column(children: [
+              Text('\${mcb}A', style: AppTypography.shareTechMono(size: 18, weight: FontWeight.bold, color: isFaulted ? AppColors.danger : AppColors.primary)),
+              const SizedBox(height: 2),
+              Text('\${liveCurrent.toStringAsFixed(2)}A', style: AppTypography.shareTechMono(size: 9, color: AppColors.success)),
+              const SizedBox(height: 2),
+              Text(area, style: AppTypography.caption.copyWith(fontSize: 8, color: AppColors.textSecondary), textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis),
+              const SizedBox(height: 4),
+              isFaulted
+                  ? Container(padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2), decoration: BoxDecoration(color: AppColors.danger, borderRadius: BorderRadius.circular(3)), child: Text('FAULT', style: AppTypography.caption.copyWith(fontSize: 7, color: Colors.white, fontWeight: FontWeight.bold)))
+                  : Text(id, style: AppTypography.shareTechMono(size: 9, color: AppColors.textMuted)),
+              const SizedBox(height: 4),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  CIRCUIT DETAIL SHEET
+// ════════════════════════════════════════════════════════════
+class _CircuitDetailSheet extends StatefulWidget {
+  final Map<String, dynamic> circuit;
+  const _CircuitDetailSheet({required this.circuit});
+  @override
+  State<_CircuitDetailSheet> createState() => _CircuitDetailSheetState();
+}
+
+class _CircuitDetailSheetState extends State<_CircuitDetailSheet> {
+  String _ai = '';
+  bool _loading = true;
+  Color _border = AppColors.border;
+
+  @override
+  void initState() { super.initState(); _fetchSafetyCheck(); }
+
+  Future<void> _fetchSafetyCheck() async {
+    final c = widget.circuit;
+    final prompt = 'Electrical safety check for Indian home circuit.\nArea: \${c['area']}  MCB: \${c['mcb_rating']}A  Wire: \${c['wire_size']}  Load: \${c['load_watts']}W  Type: \${c['circuit_type']}\n\nGive a 2-3 line safety check. Start with OK, WARNING, or DANGER. Write for a homeowner.';
+    final text = await _callGroq(prompt);
+    final upper = text.toUpperCase().trim();
+    setState(() {
+      _ai = text;
+      _loading = false;
+      _border = upper.startsWith('DANGER') ? AppColors.danger : upper.startsWith('WARNING') ? AppColors.warning : AppColors.success;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.circuit;
+    Color pc;
+    switch (c['phase']?.toString().toUpperCase()) { case 'R': pc = const Color(0xFFFF4444); break; case 'Y': pc = const Color(0xFFFFC107); break; case 'B': pc = const Color(0xFF2196F3); break; default: pc = AppColors.textMuted; }
+
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.6,
+      maxChildSize: 0.9,
+      builder: (ctx, sc) => SingleChildScrollView(
+        controller: sc,
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Center(child: Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 20), decoration: BoxDecoration(color: AppColors.textMuted, borderRadius: BorderRadius.circular(2)))),
+            Text(c['area']?.toString() ?? 'Circuit', style: AppTypography.heading2),
+            const SizedBox(height: 14),
+            Wrap(spacing: 8, runSpacing: 8, children: [
+              _chip('\${c['mcb_rating']}A MCB', AppColors.primary),
+              _chip(c['wire_size']?.toString() ?? '?', AppColors.secondary),
+              _chip('\${c['load_watts']}W', AppColors.info),
+              _chip('Phase \${c['phase']}', pc),
+              _chip(c['circuit_type']?.toString() ?? '?', AppColors.textSecondary),
+              _chip(c['classification']?.toString() ?? '?', c['classification'] == 'heavy' ? AppColors.warning : AppColors.success),
+            ]),
+            const SizedBox(height: 20),
+            Text('AI SAFETY CHECK', style: AppTypography.caption.copyWith(color: AppColors.primary, fontWeight: FontWeight.w600, letterSpacing: 1)),
+            const SizedBox(height: 10),
+            Container(width: double.infinity, padding: const EdgeInsets.all(14), decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(10), border: Border.all(color: _border, width: 2)), child: _loading ? Row(children: [const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation(AppColors.primary))), const SizedBox(width: 10), Text('Analyzing...', style: AppTypography.bodySmall)]) : Text(_ai, style: AppTypography.body)),
+            const SizedBox(height: 20),
+            SizedBox(width: double.infinity, child: ElevatedButton(onPressed: () => Navigator.pop(context), child: Text('Close', style: AppTypography.dmSans(weight: FontWeight.w600)))),
+            const SizedBox(height: 20),
+          ]),
         ),
       ),
+    );
+  }
+
+  Widget _chip(String label, Color color) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+    decoration: BoxDecoration(color: color.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(16), border: Border.all(color: color.withValues(alpha: 0.3))),
+    child: Text(label, style: AppTypography.caption.copyWith(color: color, fontWeight: FontWeight.w600)),
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+//  MANUAL ENTRY FORM
+// ════════════════════════════════════════════════════════════
+class _ManualEntryForm extends StatefulWidget {
+  final List<Map<String, dynamic>> existingCircuits;
+  final Function(List<Map<String, dynamic>>) onDone;
+  const _ManualEntryForm({required this.existingCircuits, required this.onDone});
+  @override
+  State<_ManualEntryForm> createState() => _ManualEntryFormState();
+}
+
+class _ManualEntryFormState extends State<_ManualEntryForm> {
+  late List<Map<String, dynamic>> _circuits;
+  final _areaCtrl = TextEditingController();
+  String _phase = 'R';
+  String _type = 'lighting';
+  int _mcb = 10;
+  String _wire = '1.5mm²';
+  int _load = 500;
+
+  @override
+  void initState() { super.initState(); _circuits = List.from(widget.existingCircuits); }
+
+  void _add() {
+    if (_areaCtrl.text.trim().isEmpty) return;
+    final count = _circuits.where((c) => c['phase'] == _phase).length + 1;
+    _circuits.add({
+      'id': '\$_phase\$count',
+      'phase': _phase,
+      'mcb_rating': _mcb,
+      'wire_size': _wire,
+      'load_watts': _load,
+      'area': _areaCtrl.text.trim(),
+      'circuit_type': _type,
+      'classification': (_load > 1500 || _type == 'ac' || _type == 'heater') ? 'heavy' : 'light',
+    });
+    setState(() => _areaCtrl.clear());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.85,
+      builder: (ctx, sc) => Column(children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
+          child: Row(children: [
+            Text('Add Circuits', style: AppTypography.heading3),
+            const Spacer(),
+            if (_circuits.isNotEmpty)
+              ElevatedButton(
+                onPressed: () { widget.onDone(_circuits); Navigator.pop(context); },
+                child: Text('Done (\${_circuits.length})'),
+              ),
+          ]),
+        ),
+        Divider(color: AppColors.border, height: 1),
+        Expanded(
+          child: ListView(
+            controller: sc,
+            padding: const EdgeInsets.all(16),
+            children: [
+              ..._circuits.asMap().entries.map((e) => Container(
+                margin: const EdgeInsets.only(bottom: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.border)),
+                child: Row(children: [
+                  Text(e.value['id'], style: AppTypography.shareTechMono(size: 12, color: AppColors.primary)),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(e.value['area'], style: AppTypography.bodySmall)),
+                  Text('\${e.value['mcb_rating']}A', style: AppTypography.caption),
+                  IconButton(icon: Icon(Icons.close, size: 14, color: AppColors.danger), onPressed: () => setState(() => _circuits.removeAt(e.key)), padding: EdgeInsets.zero, constraints: const BoxConstraints()),
+                ]),
+              )),
+              if (_circuits.isNotEmpty) ...[const SizedBox(height: 10), const Divider(), const SizedBox(height: 10)],
+              TextField(
+                controller: _areaCtrl,
+                style: TextStyle(color: AppColors.textPrimary),
+                decoration: InputDecoration(
+                  labelText: 'Area / Description',
+                  labelStyle: TextStyle(color: AppColors.textSecondary),
+                  filled: true,
+                  fillColor: AppColors.surface,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: AppColors.border)),
+                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: AppColors.border)),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(child: _dd('Phase', _phase, ['R', 'Y', 'B'], (v) => setState(() => _phase = v!))),
+                const SizedBox(width: 10),
+                Expanded(child: _dd('Type', _type, ['lighting', 'ac', 'socket', 'heater', 'motor', 'inverter'], (v) => setState(() => _type = v!))),
+              ]),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(child: _dd('MCB (A)', _mcb.toString(), ['6', '10', '16', '20', '25', '32', '40', '63'], (v) => setState(() => _mcb = int.parse(v!)))),
+                const SizedBox(width: 10),
+                Expanded(child: _dd('Wire', _wire, ['1.0mm²', '1.5mm²', '2.5mm²', '4mm²', '6mm²', '10mm²'], (v) => setState(() => _wire = v!))),
+              ]),
+              const SizedBox(height: 6),
+              Text('Load: \$_load W', style: AppTypography.bodySmall.copyWith(color: AppColors.textSecondary)),
+              Slider(value: _load.toDouble(), min: 0, max: 5000, divisions: 50, activeColor: AppColors.primary, label: '\$_load W', onChanged: (v) => setState(() => _load = v.round())),
+              const SizedBox(height: 10),
+              SizedBox(width: double.infinity, child: ElevatedButton.icon(onPressed: _add, icon: const Icon(Icons.add), label: const Text('Add Circuit'))),
+            ],
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _dd(String label, String val, List<String> items, ValueChanged<String?> onChange) {
+    return DropdownButtonFormField<String>(
+      value: val,
+      dropdownColor: AppColors.cardBackground,
+      style: TextStyle(color: AppColors.textPrimary, fontSize: 13),
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: TextStyle(color: AppColors.textSecondary, fontSize: 11),
+        filled: true,
+        fillColor: AppColors.surface,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: AppColors.border)),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: AppColors.border)),
+      ),
+      items: items.map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
+      onChanged: onChange,
     );
   }
 }
